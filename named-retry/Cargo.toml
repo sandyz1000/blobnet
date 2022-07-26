@@ -1,0 +1,19 @@
+[package]
+name = "named-retry"
+version = "0.1.0"
+authors = ["Eric Zhang <ekzhang1@gmail.com>"]
+license = "MIT"
+description = "A simple utility for retrying fallible asynchronous operations."
+repository = "https://github.com/modal-labs/blobnet"
+documentation = "https://docs.rs/named-retry"
+keywords = ["retry", "async"]
+categories = ["development-tools::debugging", "asynchronous", "network-programming"]
+readme = "README.md"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.17.0", features = ["time"] }
+tracing = "0.1.32"
+
+[dev-dependencies]
+tokio = { version = "1.17.0", features = ["test-util"] }
