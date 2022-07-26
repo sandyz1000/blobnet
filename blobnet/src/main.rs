@@ -70,6 +70,7 @@ async fn main() -> Result<()> {
     let incoming = AddrIncoming::bind(&addr).context("failed to listen on address")?;
     println!("listening on http://{addr}");
     let mut shutdown = Shutdown::new()?;
+    tokio::spawn(blobnet::cleaner(config.clone()));
     blobnet::listen_with_shutdown(config, incoming, shutdown.recv()).await?;
     Ok(())
 }

@@ -14,6 +14,7 @@ edition = "2021"
 [dependencies]
 anyhow = { version = "1.0.56", features = ["backtrace"] }
 clap = { version = "3.1.6", features = ["derive", "env"] }
+fastrand = "1.8.0"
 hyper = { version = "0.14.18", features = ["full"] }
 named-retry = { path = "../named-retry" }
 sha2 = "0.10.2"

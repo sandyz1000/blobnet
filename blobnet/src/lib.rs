@@ -19,6 +19,7 @@ pub use hyper::server::conn::AddrIncoming;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Request, Response, Server, StatusCode};
 use named_retry::Retry;
+use tokio::{fs, time};
 
 use crate::handler::handle;
 
@@ -75,6 +76,32 @@ pub async fn listen_with_shutdown(
         .serve(make_svc)
         .with_graceful_shutdown(shutdown)
         .await
+}
+
+/// A background process that periodically cleans the cache directory.
+///
+/// Since the cache directory is limited in size but local to the machine, it is
+/// acceptable to delete files from this folder at any time. Therefore, we can
+/// simply remove 1/(256^2) of all files at an interval of 60 seconds.
+///
+/// Doing the math, it would take (256^2) / 60 / 24 = ~46 days on average to
+/// expire any given file from the disk cache directory.
+pub async fn cleaner(config: Config) {
+    const CLEAN_INTERVAL: Duration = Duration::from_secs(30);
+    loop {
+        time::sleep(CLEAN_INTERVAL).await;
+        let prefix = fastrand::u16(..);
+        let (d1, d2) = (prefix / 256, prefix % 256);
+        let subfolder = config.storage_path.join(&format!("{d1:x}/{d2:x}"));
+        if fs::metadata(&subfolder).await.is_ok() {
+            println!("cleaning cache directory: {}", subfolder.display());
+            let subfolder_tmp = config.storage_path.join(&format!("{d1:x}/.tmp-{d2:x}"));
+            fs::remove_dir_all(&subfolder_tmp).await.ok();
+            if fs::rename(&subfolder, &subfolder_tmp).await.is_ok() {
+                fs::remove_dir_all(&subfolder_tmp).await.ok();
+            }
+        }
+    }
 }
 
 /// An asynchronous client for the file server.
