@@ -32,4 +32,5 @@ jobs:
         uses: unfor19/install-aws-cli-action@v1.0.3
 
       - name: Upload binary
-        uses: aws s3 cp target/release/blobnet s3://modal-artifacts/blobnet-${GITHUB_REF#refs/tags/blobnet-v}"
+        run: |
+          aws s3 cp target/release/blobnet "s3://modal-artifacts/blobnet/blobnet-${GITHUB_REF#refs/tags/blobnet-v}"
