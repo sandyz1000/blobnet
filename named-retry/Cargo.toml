@@ -1,6 +1,6 @@
 [package]
 name = "named-retry"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Eric Zhang <ekzhang1@gmail.com>"]
 license = "MIT"
 description = "A simple utility for retrying fallible asynchronous operations."

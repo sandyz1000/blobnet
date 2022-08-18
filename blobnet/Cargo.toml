@@ -1,6 +1,6 @@
 [package]
 name = "blobnet"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Eric Zhang <ekzhang1@gmail.com>"]
 license = "MIT"
 description = "Non-volatile, distributed file cache backed by content-addressed storage."
@@ -16,7 +16,7 @@ anyhow = { version = "1.0.56", features = ["backtrace"] }
 clap = { version = "3.1.6", features = ["derive", "env"] }
 fastrand = "1.8.0"
 hyper = { version = "0.14.18", features = ["full"] }
-named-retry = { path = "../named-retry", version = "0.1.0" }
+named-retry = { path = "../named-retry", version = "0.2.0" }
 sha2 = "0.10.2"
 shutdown = "0.2.1"
 tempfile = "3.3.0"

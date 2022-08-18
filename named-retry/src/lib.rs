@@ -1,5 +1,6 @@
 //! Utilities for retrying falliable, asynchronous operations.
 
+use std::fmt::Debug;
 use std::future::Future;
 use std::time::Duration;
 
@@ -60,7 +61,7 @@ impl Retry {
     ///
     /// Panics if the number of attempts is set to `0`, or the base delay is
     /// incorrectly set to a negative duration.
-    pub async fn run<T, E, Fut>(self, mut func: impl FnMut() -> Fut) -> Result<T, E>
+    pub async fn run<T, E: Debug, Fut>(self, mut func: impl FnMut() -> Fut) -> Result<T, E>
     where
         Fut: Future<Output = Result<T, E>>,
     {
@@ -74,8 +75,8 @@ impl Retry {
             match func().await {
                 Ok(value) => return Ok(value),
                 Err(err) if i == self.attempts - 1 => return Err(err),
-                _ => {
-                    warn!(name = %self.name, attempt = i, ?delay, "failed invoking function, retrying");
+                Err(err) => {
+                    warn!(?err, "failed retryable operation {}, retrying", self.name);
                     time::sleep(delay).await;
                     delay = delay.mul_f64(self.delay_factor);
                 }
