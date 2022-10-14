@@ -13,7 +13,7 @@ env:
 jobs:
   upload:
     name: Upload binaries
-    if: github.repository_owner == 'modal_labs'
+    if: github.repository_owner == 'modal-labs'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
