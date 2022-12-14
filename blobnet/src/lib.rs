@@ -25,7 +25,7 @@
 //! let provider = provider::Memory::new();
 //!
 //! // Insert data, returning its hash.
-//! let data: ReadStream = Box::pin(Cursor::new(b"hello blobnet world!"));
+//! let data: ReadStream = Box::pin(b"hello blobnet world!" as &[u8]);
 //! let hash = provider.put(data).await?;
 //!
 //! // Check if a blob exists and return its size.
@@ -133,11 +133,14 @@ mod headers {
     pub const HEADER_FILE_LENGTH: HeaderName = HeaderName::from_static("x-bn-file-length");
 }
 
+/// Internal type alias for a byte range.
+type BlobRange = Option<(u64, u64)>;
+
 /// A stream of bytes from some data source.
-pub type ReadStream = Pin<Box<dyn AsyncRead + Send>>;
+pub type ReadStream<'a> = Pin<Box<dyn AsyncRead + Send + 'a>>;
 
 /// Helper function to collect a [`ReadStream`] into a byte vector.
-pub async fn read_to_vec(mut stream: ReadStream) -> io::Result<Vec<u8>> {
+pub async fn read_to_vec(mut stream: ReadStream<'_>) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
     Ok(buf)
