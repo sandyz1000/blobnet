@@ -123,6 +123,8 @@ pub mod client;
 mod fast_aio;
 pub mod provider;
 pub mod server;
+#[doc(hidden)]
+pub mod test_provider;
 mod utils;
 
 #[allow(clippy::declare_interior_mutable_const)]
