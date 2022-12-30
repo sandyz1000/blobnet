@@ -106,7 +106,7 @@
 //! Together these abstractions allow you to create a configurable, very
 //! low-latency content-addressed storage system.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 use std::io;
@@ -120,6 +120,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use crate::provider::{Cached, Provider};
 
 pub mod client;
+mod fast_aio;
 pub mod provider;
 pub mod server;
 mod utils;

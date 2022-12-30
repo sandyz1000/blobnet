@@ -25,6 +25,7 @@ hashlink = "0.8.1"
 hex = "0.4.3"
 hyper = { version = "0.14.18", features = ["full"] }
 hyperlocal = "0.8.0"
+libc = "0.2.139"
 named-retry = { path = "../named-retry", version = "0.2.0" }
 parking_lot = "0.12.1"
 sha2 = "0.10.2"

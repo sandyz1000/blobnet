@@ -1,7 +1,10 @@
 use std::time::Duration;
 
-use blobnet::provider::{self, Provider};
-use criterion::{criterion_group, criterion_main, Criterion};
+use blobnet::{
+    provider::{self, Provider},
+    read_to_vec,
+};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use tokio::runtime::Runtime;
 
 async fn insert_read(provider: impl Provider) -> anyhow::Result<()> {
@@ -12,9 +15,10 @@ async fn insert_read(provider: impl Provider) -> anyhow::Result<()> {
         let hash = provider.put(Box::pin(&data[..])).await?;
         hashes.push(hash);
     }
-    for _ in 0..100 {
+    for _ in 0..10 {
         for hash in &hashes {
-            provider.get(hash, None).await?;
+            let stream = provider.get(hash, None).await?;
+            black_box(read_to_vec(stream).await?);
         }
     }
     Ok(())
@@ -51,7 +55,7 @@ criterion_group! {
     name = benches;
     config = Criterion::default()
         .sample_size(20)
-        .measurement_time(Duration::from_secs(8));
+        .measurement_time(Duration::from_secs(10));
     targets = bench
 }
 criterion_main!(benches);

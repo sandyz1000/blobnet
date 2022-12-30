@@ -1,8 +1,9 @@
 //! Configurable, async storage providers for blob access.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::future::Future;
-use std::io::{self, Cursor, SeekFrom};
+use std::io::{self, Cursor, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,20 +13,21 @@ use async_trait::async_trait;
 use auto_impl::auto_impl;
 use aws_sdk_s3::{
     error::{GetObjectErrorKind, HeadObjectErrorKind},
-    types::{ByteStream, SdkError},
+    types::SdkError,
 };
 use hashlink::LinkedHashMap;
 use hyper::{body::Bytes, client::connect::Connect};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use tempfile::tempfile;
-use tokio::fs::{self, File};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio::{task, time};
 use tokio_stream::StreamExt;
 use tokio_util::io::StreamReader;
 
 use crate::client::FileClient;
+use crate::fast_aio::file_reader;
 use crate::utils::{atomic_copy, hash_path, stream_body};
 use crate::{read_to_vec, BlobRange, Error, ReadStream};
 
@@ -201,17 +203,13 @@ impl Provider for S3 {
 
     async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
         let (hash, file) = make_data_tempfile(data).await?;
-        let body = ByteStream::read_from()
-            .file(file)
-            .build()
-            .await
-            .map_err(anyhow::Error::from)?;
+        let body = stream_body(file_reader(file, None));
         self.client
             .put_object()
             .bucket(&self.bucket)
             .key(hash_path(&hash)?)
             .checksum_sha256(base64::encode(hex::decode(&hash).unwrap()))
-            .body(body)
+            .body(body.into())
             .send()
             .await
             .map_err(anyhow::Error::from)?;
@@ -251,24 +249,16 @@ impl Provider for LocalDir {
         check_range(range)?;
         let key = hash_path(hash)?;
         let path = self.dir.join(key);
-        let mut file = match File::open(&path).await {
+        let file = match File::open(path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Err(Error::NotFound),
             Err(err) => return Err(err.into()),
         };
-        if let Some((start, end)) = range {
-            if start != 0 {
-                file.seek(SeekFrom::Start(start)).await?;
-            }
-            Ok(Box::pin(file.take(end - start)))
-        } else {
-            Ok(Box::pin(file))
-        }
+        Ok(file_reader(file, range))
     }
 
     async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
         let (hash, file) = make_data_tempfile(data).await?;
-        let file = file.into_std().await;
         let key = hash_path(&hash)?;
         let path = self.dir.join(key);
         task::spawn_blocking(move || atomic_copy(file, path))
@@ -302,31 +292,29 @@ impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
 
     async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
         let (_, file) = make_data_tempfile(data).await?;
+        let file = Arc::new(file);
         self.client
-            .put(|| async { Ok(stream_body(Box::pin(file.try_clone().await?))) })
+            .put(|| async { Ok(stream_body(file_reader(Arc::clone(&file), None))) })
             .await
     }
 }
 
-/// Stream data from a source into a temporary file and compute the hash.
-async fn make_data_tempfile(data: ReadStream<'_>) -> anyhow::Result<(String, File)> {
-    let mut file = File::from_std(task::spawn_blocking(tempfile).await??);
+/// Stream data from a source into a temporary file and compute its hash.
+async fn make_data_tempfile(mut data: ReadStream<'_>) -> anyhow::Result<(String, File)> {
+    let mut file = task::spawn_blocking(tempfile).await??;
     let mut hash = Sha256::new();
-    let mut reader = BufReader::new(data);
     loop {
-        let size = {
-            let buf = reader.fill_buf().await?;
-            if buf.is_empty() {
-                break;
-            }
-            hash.update(buf);
-            file.write_all(buf).await?;
-            buf.len()
-        };
-        reader.consume(size);
+        let mut buf = Vec::with_capacity(1 << 21);
+        let size = data.read_buf(&mut buf).await?;
+        if size == 0 {
+            break;
+        }
+        hash.update(&buf);
+        // Hack needed for ownership issues with spawn_blocking being 'static.
+        file = task::spawn_blocking(move || file.write_all(&buf).map(|_| file)).await??;
     }
     let hash = format!("{:x}", hash.finalize());
-    file.seek(SeekFrom::Start(0)).await?;
+    file = task::spawn_blocking(move || file.seek(SeekFrom::Start(0)).map(|_| file)).await??;
     Ok((hash, file))
 }
 
@@ -436,7 +424,7 @@ struct CachedState<P> {
     pagesize: u64,
 }
 
-impl<P: 'static> Cached<P> {
+impl<P> Cached<P> {
     /// Create a new cache wrapper for the given provider.
     ///
     /// Set the page size in bytes for cached chunks, as well as the directory
@@ -510,10 +498,10 @@ impl<P> CachedState<P> {
             time::sleep(CLEAN_INTERVAL).await;
             let prefix = fastrand::u16(..);
             let (d1, d2) = (prefix / 256, prefix % 256);
-            let subfolder = self.dir.join(&format!("{d1:x}/{d2:x}"));
+            let subfolder = self.dir.join(format!("{d1:x}/{d2:x}"));
             if fs::metadata(&subfolder).await.is_ok() {
                 println!("cleaning cache directory: {}", subfolder.display());
-                let subfolder_tmp = self.dir.join(&format!("{d1:x}/.tmp-{d2:x}"));
+                let subfolder_tmp = self.dir.join(format!("{d1:x}/.tmp-{d2:x}"));
                 fs::remove_dir_all(&subfolder_tmp).await.ok();
                 if fs::rename(&subfolder, &subfolder_tmp).await.is_ok() {
                     fs::remove_dir_all(&subfolder_tmp).await.ok();
