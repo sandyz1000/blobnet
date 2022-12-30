@@ -25,12 +25,8 @@ use crate::{BlobRange, ReadStream};
 /// non-configurable 16 KiB intermediate buffer size, which makes large reads
 /// extremely inefficient.
 ///
-/// It also skips an `lseek` system call for reads in the middle of a file. All
-/// read operations are buffered at 2 MiB.
-///
-/// The buffer is reused for each read operation, but there is still a 60 µs
-/// cost for initializing it, mostly due to the memset. We could eliminate this
-/// cost by using unsafe code to read into uninitialized memory.
+/// It also uses `pread`, resulting in one less `lseek` system call for reads in
+/// the middle of a file. All read operations are buffered at 2 MiB.
 pub(crate) fn file_reader(file: impl Into<Arc<File>>, range: BlobRange) -> ReadStream<'static> {
     let range = range.unwrap_or((0, u64::MAX));
     let buf_size = (range.1 - range.0).min(1 << 21) as usize;
