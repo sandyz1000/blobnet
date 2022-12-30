@@ -13,8 +13,8 @@ use tokio::runtime::Runtime;
 use tokio_stream::StreamExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-/// Insert 100 blobs of 1KB each, then read each 100 times.
-async fn insert_read_10k(provider: impl Provider) -> anyhow::Result<()> {
+/// Insert 100 blobs of 1KB each, then read each 10 times.
+async fn insert_read_1k(provider: impl Provider) -> anyhow::Result<()> {
     let mut hashes = Vec::new();
     for i in 0..100 {
         let mut data = b"asdf".repeat(256);
@@ -31,7 +31,7 @@ async fn insert_read_10k(provider: impl Provider) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn bench_insert_read_10k(c: &mut Criterion) {
+fn bench_insert_read_1k(c: &mut Criterion) {
     let runtime = Runtime::new().unwrap();
 
     let mut g = c.benchmark_group("insert_read_1k");
@@ -40,18 +40,18 @@ fn bench_insert_read_10k(c: &mut Criterion) {
 
     g.bench_function("memory", |b| {
         let provider = provider::Memory::new();
-        runtime.block_on(insert_read_10k(&provider)).unwrap();
+        runtime.block_on(insert_read_1k(&provider)).unwrap();
         b.to_async(&runtime).iter(|| async {
-            insert_read_10k(&provider).await.unwrap();
+            insert_read_1k(&provider).await.unwrap();
         });
     });
 
     g.bench_function("localdir", |b| {
         let dir = tempfile::tempdir().unwrap();
         let provider = provider::LocalDir::new(dir.path());
-        runtime.block_on(insert_read_10k(&provider)).unwrap();
+        runtime.block_on(insert_read_1k(&provider)).unwrap();
         b.to_async(&runtime).iter(|| async {
-            insert_read_10k(&provider).await.unwrap();
+            insert_read_1k(&provider).await.unwrap();
         });
     });
 
@@ -62,9 +62,9 @@ fn bench_insert_read_10k(c: &mut Criterion) {
             dir.path().join("cache"),
             1 << 21,
         );
-        runtime.block_on(insert_read_10k(&provider)).unwrap();
+        runtime.block_on(insert_read_1k(&provider)).unwrap();
         b.to_async(&runtime).iter(|| async {
-            insert_read_10k(&provider).await.unwrap();
+            insert_read_1k(&provider).await.unwrap();
         });
     });
 
@@ -162,5 +162,5 @@ fn bench_image_delayed(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_insert_read_10k, bench_image_delayed);
+criterion_group!(benches, bench_insert_read_1k, bench_image_delayed);
 criterion_main!(benches);
