@@ -87,7 +87,7 @@ pub(crate) fn atomic_copy(mut source: impl Read, dest: impl AsRef<Path>) -> Resu
 
 /// Convert a [`ReadStream`] object into an HTTP body.
 pub(crate) fn stream_body(stream: ReadStream<'static>) -> Body {
-    Body::wrap_stream(ReaderStream::new(stream))
+    Body::wrap_stream(ReaderStream::with_capacity(stream, 1 << 21))
 }
 
 /// Convert an HTTP body into a [`ReadStream`] object.

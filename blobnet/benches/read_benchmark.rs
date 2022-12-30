@@ -1,6 +1,6 @@
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
-use std::{path::Path, time::Duration};
+use std::time::{Duration, Instant};
 
 use blobnet::{
     provider::{self, Provider},
