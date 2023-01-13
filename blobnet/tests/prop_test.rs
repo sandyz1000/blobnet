@@ -36,10 +36,10 @@ async fn run_cached_comparison(
     let mem_cached = Cached::new(Memory::new(), dir.join("c1"), 4096);
     let ldir_cached = Cached::new(LocalDir::new(dir.join("ldir2")), dir.join("c2"), 4096);
 
-    let h1 = mem.put(Box::pin(&data[..])).await?;
-    let h2 = ldir.put(Box::pin(&data[..])).await?;
-    let h3 = mem_cached.put(Box::pin(&data[..])).await?;
-    let h4 = ldir_cached.put(Box::pin(&data[..])).await?;
+    let h1 = mem.put(Box::pin(&*data)).await?;
+    let h2 = ldir.put(Box::pin(&*data)).await?;
+    let h3 = mem_cached.put(Box::pin(&*data)).await?;
+    let h4 = ldir_cached.put(Box::pin(&*data)).await?;
 
     Ok(h1 == h2 && h1 == h3 && h1 == h4 && {
         let r1 = mem.get(&h1, range).await;

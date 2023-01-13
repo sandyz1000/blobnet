@@ -19,7 +19,7 @@ async fn insert_read_1k(provider: impl Provider) -> anyhow::Result<()> {
     for i in 0..100 {
         let mut data = b"asdf".repeat(256);
         data.extend(u32::to_le_bytes(i));
-        let hash = provider.put(Box::pin(&data[..])).await?;
+        let hash = provider.put(Box::pin(&*data)).await?;
         hashes.push(hash);
     }
     for _ in 0..10 {
@@ -78,13 +78,13 @@ async fn image_setup(provider: impl Provider) -> anyhow::Result<Vec<String>> {
     // Create 128 files of size 0-1KB.
     for size in 0..128 {
         let data = b"12345678".repeat(size);
-        hashes.push(provider.put(Box::pin(&data[..])).await?);
+        hashes.push(provider.put(Box::pin(&*data)).await?);
     }
 
     // Create a couple files of size 1-10 MB.
     for size in 1..=10 {
         let data = b"a".repeat(1048576 * size);
-        hashes.push(provider.put(Box::pin(&data[..])).await?);
+        hashes.push(provider.put(Box::pin(&*data)).await?);
     }
 
     // Create a big file of size 1 GB.
