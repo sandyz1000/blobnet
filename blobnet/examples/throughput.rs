@@ -1,56 +1,44 @@
-//! This creates client connections against a blobnet server. Useful
-//! for measuring network throughput.
-//!
-//! To use this script, run like the following example:
-//!
-//! ```bash
-//! cargo run --release --example throughput http://127.0.0.1:7609 secret
-//! ```
-//!
-//! The first argument is the address of the blobnet server, and the second
-//! argument is the authentication secret.
-//!
-//! The third argument is the number of clients to use.
-
-use std::env;
-
 use anyhow::Result;
 use blobnet::{client::FileClient, read_to_vec};
+use clap::Parser;
 use hyper::client::HttpConnector;
 use tokio::task;
 
+/// Create client connections against a blobnet server. Useful for measuring
+/// network throughput.
+#[derive(Parser)]
+struct Args {
+    /// Address of the blobnet server (for example: `http://localhost:7609`).
+    origin: String,
+
+    /// Authentication secret.
+    secret: String,
+
+    /// Number of clients to use.
+    n_tasks: u32,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    assert!(
-        args.len() == 4,
-        "usage: {} <origin> <secret> <n_tasks>",
-        args[0]
-    );
+    let args = Args::parse();
 
-    let origin = &args[1];
-    let secret = &args[2];
-    let n_tasks: &u32 = &args[3].parse().unwrap();
-
-    println!("target => {}", origin);
+    println!("target => {}", args.origin);
 
     // Send data to blobnet.
     let data = str::repeat("abcdefghijklmnop", 4096 * 100);
-    let mut connector = HttpConnector::new();
-    connector.set_nodelay(true);
-    let client = FileClient::new(connector, &origin, &secret);
+    let client = FileClient::new_http(&args.origin, &args.secret);
     let hash = client.put(|| async { Ok(data.clone()) }).await?;
 
     // Create clients as background tasks.
     let mut set = task::JoinSet::new();
-    for _ in 0..*n_tasks {
+    for _ in 0..args.n_tasks {
         set.spawn(repeat_requests(
-            origin.clone(),
-            secret.clone(),
+            args.origin.clone(),
+            args.secret.clone(),
             hash.clone(),
         ));
     }
-    println!("spawned tasks => {}", n_tasks);
+    println!("spawned tasks => {}", args.n_tasks);
     set.join_next().await;
     Ok(())
 }
