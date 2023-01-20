@@ -71,14 +71,18 @@ pub(crate) fn atomic_copy(mut source: impl Read, dest: impl AsRef<Path>) -> Resu
             io::copy(&mut source, &mut writer)?;
         }
 
-        if let Err(err) = file.persist_noclobber(dest) {
-            // Ignore error if another caller created the file in the meantime.
-            if err.error.kind() != ErrorKind::AlreadyExists {
-                return Err(err.into());
+        match file.persist_noclobber(dest) {
+            Ok(file) => {
+                file.sync_data()?;
+                Ok(true)
             }
-            Ok(false)
-        } else {
-            Ok(true)
+            Err(err) => {
+                // Ignore error if another caller created the file in the meantime.
+                if err.error.kind() != ErrorKind::AlreadyExists {
+                    return Err(err.into());
+                }
+                Ok(false)
+            }
         }
     } else {
         Ok(false)
