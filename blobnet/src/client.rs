@@ -38,7 +38,9 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
     /// Create a new file client object pointing at a given origin.
     pub fn new(connector: C, origin: &str, secret: &str) -> Self {
         FileClient {
-            client: Client::builder().build(connector),
+            client: Client::builder()
+                .http2_max_frame_size(1 << 17)
+                .build(connector),
             origin: origin.into(),
             secret: secret.into(),
         }

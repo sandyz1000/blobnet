@@ -63,6 +63,7 @@ where
     });
 
     Server::builder(incoming)
+        .http2_max_frame_size(1 << 17)
         .serve(make_svc)
         .with_graceful_shutdown(shutdown)
         .await
