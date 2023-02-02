@@ -109,7 +109,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
                 .uri(&format!("{}/{}", self.origin, hash))
                 .header(HEADER_SECRET, &self.secret);
             if let Some((start, end)) = range {
-                req = req.header(HEADER_RANGE, format!("{}-{}", start, end));
+                req = req.header(HEADER_RANGE, format!("{start}-{end}"));
             }
             Ok(req.body(Body::empty())?)
         };

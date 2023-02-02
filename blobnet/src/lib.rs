@@ -112,6 +112,7 @@
 use std::io;
 use std::pin::Pin;
 
+use anyhow::anyhow;
 use hyper::{Body, Response, StatusCode};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -171,6 +172,17 @@ pub enum Error {
     /// An operational error occurred in blobnet.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
+}
+
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        match self {
+            Error::NotFound => Error::NotFound,
+            Error::BadRange => Error::BadRange,
+            Error::IO(err) => Error::IO(io::Error::new(io::ErrorKind::Other, err.to_string())),
+            Error::Internal(err) => Error::Internal(anyhow!("{err}")),
+        }
+    }
 }
 
 impl From<Error> for io::Error {
