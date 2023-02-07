@@ -355,6 +355,7 @@ impl<P1: Provider, P2: Provider> Provider for (P1, P2) {
 /// A provider wrapper that caches data locally.
 pub struct Cached<P> {
     state: Arc<CachedState<P>>,
+    prefetch_depth: u32,
 }
 
 /// Constant cost associated with every entry in the page cache.
@@ -440,7 +441,13 @@ impl<P> Cached<P> {
                 dir: dir.as_ref().to_owned(), // File system cache
                 pagesize,
             }),
+            prefetch_depth: 0,
         }
+    }
+
+    /// Prefetch the N-ahead chunk. Setting to 0 implies no prefetching.
+    pub fn set_prefetch_depth(&mut self, n: u32) {
+        self.prefetch_depth = n;
     }
 
     /// A background process that periodically cleans the cache directory.
@@ -545,7 +552,7 @@ impl<P> CachedState<P> {
     }
 }
 
-impl<P: Provider> CachedState<P> {
+impl<P: Provider + 'static> CachedState<P> {
     /// Read the size of a file, with caching.
     async fn get_cached_size(&self, hash: &str) -> Result<u64, Error> {
         let size = self
@@ -560,7 +567,7 @@ impl<P: Provider> CachedState<P> {
     }
 
     /// Read a chunk of data, with caching.
-    async fn get_cached_chunk(&self, hash: &str, n: u64) -> Result<Bytes, Error> {
+    async fn get_single_cached_chunk(&self, hash: &str, n: u64) -> Result<Bytes, Error> {
         assert!(n > 0, "chunks of file data start at 1");
 
         let lo = (n - 1) * self.pagesize;
@@ -572,6 +579,25 @@ impl<P: Provider> CachedState<P> {
                 .into())
         })
         .await
+    }
+
+    /// Read a chunk of data, with caching and optionally prefetching.
+    async fn get_cached_chunk(
+        self: &Arc<Self>,
+        hash: &str,
+        n: u64,
+        prefetch_depth: u32,
+    ) -> Result<Bytes, Error> {
+        if prefetch_depth > 0 {
+            let this = Arc::clone(self);
+            let hash = hash.to_string();
+            tokio::spawn(async move {
+                this.get_single_cached_chunk(&hash, n + prefetch_depth as u64)
+                    .await
+                    .ok();
+            });
+        }
+        self.get_single_cached_chunk(hash, n).await
     }
 }
 
@@ -596,10 +622,15 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         debug_assert!(chunk_begin >= 1);
         debug_assert!(chunk_begin <= chunk_end);
 
+        let prefetch_depth = self.prefetch_depth;
+
         // Read the first chunk, and return empty data if out of bounds (or NotFound if
         // non-existent). Otherwise, the range should be valid, and we can continue
         // reading until we reach the end of the requested range or get an error.
-        let first_chunk = self.state.get_cached_chunk(hash, chunk_begin).await?;
+        let first_chunk = self
+            .state
+            .get_cached_chunk(hash, chunk_begin, prefetch_depth)
+            .await?;
         let initial_offset = start - (chunk_begin - 1) * self.state.pagesize;
         if initial_offset > first_chunk.len() as u64 {
             return Ok(empty_stream());
@@ -626,7 +657,7 @@ impl<P: Provider + 'static> Provider for Cached<P> {
                 if chunk == chunk_begin {
                     return Ok::<_, Error>(first_chunk);
                 }
-                let bytes = state.get_cached_chunk(&hash, chunk).await?;
+                let bytes = state.get_cached_chunk(&hash, chunk, prefetch_depth).await?;
                 let mut remaining_bytes = remaining_bytes.lock();
                 if bytes.len() as u64 > *remaining_bytes {
                     let result = bytes.slice(..*remaining_bytes as usize);
