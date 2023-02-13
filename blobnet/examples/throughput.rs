@@ -1,7 +1,6 @@
 use anyhow::Result;
 use blobnet::{client::FileClient, read_to_vec};
 use clap::Parser;
-use hyper::client::HttpConnector;
 use tokio::task;
 
 /// Create client connections against a blobnet server. Useful for measuring
@@ -45,10 +44,7 @@ async fn main() -> Result<()> {
 
 // Makes continuous requests to a Blobnet server.
 async fn repeat_requests(origin: String, secret: String, hash: String) -> Result<()> {
-    let mut connector = HttpConnector::new();
-    connector.set_nodelay(true);
-    let client = FileClient::new(connector, &origin, &secret);
-
+    let client = FileClient::new_http(&origin, &secret);
     loop {
         read_to_vec(client.get(&hash, None).await?).await?;
     }
