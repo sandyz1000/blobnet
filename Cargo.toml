@@ -1,5 +1,2 @@
 [workspace]
 members = ["blobnet", "named-retry"]
-
-[profile.release]
-debug = 1
