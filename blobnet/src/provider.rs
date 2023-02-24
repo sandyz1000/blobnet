@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use auto_impl::auto_impl;
 use aws_sdk_s3::{
@@ -20,9 +20,7 @@ use hyper::{body::Bytes, client::connect::Connect};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use tempfile::tempfile;
-use tokio::fs;
-use tokio::io::AsyncReadExt;
-use tokio::{task, time};
+use tokio::{fs, io::AsyncReadExt, sync::broadcast, task, time};
 use tokio_stream::StreamExt;
 use tokio_util::io::StreamReader;
 
@@ -362,6 +360,8 @@ pub struct Cached<P> {
 
 /// Constant cost associated with every entry in the page cache.
 const PAGE_CACHE_ENTRY_COST: u64 = 80;
+/// Maximum time to wait for a pending cache population request.
+const MAX_PENDING_REQUEST_WAIT_MS: u64 = 60_000;
 
 /// An in-memory, two-stage LRU based page cache.
 struct PageCache {
@@ -418,9 +418,22 @@ impl Default for PageCache {
     }
 }
 
+type RequestKey = (String, u64);
+type SenderHandle = broadcast::Sender<Result<Bytes, Error>>;
+type PendingRequest = broadcast::Receiver<Result<Bytes, Error>>;
+
+// A deduplicated request has 1 sender and N waiters on the pending
+// request.
+#[derive(Debug)]
+enum RequestRole {
+    Sender(SenderHandle),
+    Waiter(PendingRequest),
+}
+
 struct CachedState<P> {
     inner: P,
     page_cache: Mutex<PageCache>,
+    pending_requests: Mutex<HashMap<RequestKey, PendingRequest>>,
     dir: PathBuf,
     pagesize: u64,
 }
@@ -436,6 +449,7 @@ impl<P> Cached<P> {
             state: Arc::new(CachedState {
                 inner,
                 page_cache: Default::default(),
+                pending_requests: Default::default(),
                 dir: dir.as_ref().to_owned(), // File system cache
                 pagesize,
             }),
@@ -488,14 +502,63 @@ impl<P> CachedState<P> {
             return Ok(bytes);
         }
 
-        let bytes = func().await?;
+        // Check for pending requests to the same hash and offset and deduplicate them
+        // if found, listening for the immediate following response.
+        let key = (hash.clone(), n);
+        let role = {
+            use std::collections::hash_map::Entry::*;
+
+            match self.pending_requests.lock().entry(key.clone()) {
+                Occupied(o) => RequestRole::Waiter(o.get().resubscribe()),
+                Vacant(v) => {
+                    let (tx, rx) = broadcast::channel(1);
+                    v.insert(rx);
+                    RequestRole::Sender(tx)
+                }
+            }
+        };
+
+        let result = match role {
+            RequestRole::Waiter(mut rx) => {
+                match time::timeout(
+                    Duration::from_millis(MAX_PENDING_REQUEST_WAIT_MS),
+                    rx.recv(),
+                )
+                .await
+                {
+                    Ok(result) => match result {
+                        Ok(r) => return r,
+                        Err(_) => return Err(anyhow!("pending request channel dropped").into()),
+                    },
+                    Err(err) => {
+                        eprintln!("timeout waiting on pending request {key:?}: {err:?}");
+                        func().await
+                    }
+                }
+            }
+            RequestRole::Sender(tx) => {
+                let result = func().await;
+                // Finish all blocked, pending requests.
+                if let Some(_rx) = self.pending_requests.lock().remove(&key) {
+                    tx.send(result.clone()).ok();
+                }
+                result
+            }
+        };
+
+        let bytes = result?;
+
+        // Place bytes in the file system cache.
         let read_buf = Cursor::new(bytes.clone());
         task::spawn_blocking(move || {
             if let Err(err) = atomic_copy(read_buf, &path) {
                 eprintln!("error writing {path:?} cache file: {err:?}");
             }
         });
+
+        // Place bytes in the in-memory page cache.
         self.page_cache.lock().insert(hash, n, bytes.clone());
+
         Ok(bytes)
     }
 
