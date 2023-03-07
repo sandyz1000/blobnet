@@ -5,6 +5,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{ready, Poll};
 use std::time::Duration;
 
@@ -12,6 +14,45 @@ use async_trait::async_trait;
 use tokio::io::AsyncRead;
 
 use crate::{provider::Provider, BlobRange, Error, ReadStream};
+
+/// Tracks network out bytes served by `get` requests.
+pub struct Tracking<P> {
+    inner: P,
+    pub get_net_bytes_served: Arc<AtomicUsize>,
+}
+
+impl<P> Tracking<P> {
+    /// Create a new `Tracking` provider.
+    pub fn new(inner: P) -> Self {
+        Self {
+            inner,
+            get_net_bytes_served: AtomicUsize::new(0).into(),
+        }
+    }
+
+    /// Wrap a stream, introducing tracking of bytes sent.
+    fn wrap_tracking<'a>(&self, data: ReadStream<'a>) -> ReadStream<'a> {
+        Box::pin(TrackingStream::new(data, self.get_net_bytes_served.clone()))
+    }
+}
+
+#[async_trait]
+impl<P: Provider> Provider for Tracking<P> {
+    async fn head(&self, hash: &str) -> Result<u64, Error> {
+        let result = self.inner.head(hash).await;
+        result
+    }
+
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
+        let result = self.inner.get(hash, range).await;
+        Ok(self.wrap_tracking(result?))
+    }
+
+    async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
+        let result = self.inner.put(data).await;
+        result
+    }
+}
 
 /// Adds random delay to all operations of a provider.
 ///
@@ -135,4 +176,31 @@ async fn wait(mut mean: f64) {
     })
     .await
     .unwrap();
+}
+
+struct TrackingStream<'a> {
+    inner: ReadStream<'a>,
+    bytes_read: Arc<AtomicUsize>,
+}
+
+impl<'a> TrackingStream<'a> {
+    fn new(inner: ReadStream<'a>, bytes_read: Arc<AtomicUsize>) -> Self {
+        Self { inner, bytes_read }
+    }
+}
+
+impl AsyncRead for TrackingStream<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+
+        let len = buf.filled().len();
+        ready!(this.inner.as_mut().poll_read(cx, buf))?;
+        let bytes_sent = buf.filled().len() - len;
+        this.bytes_read.fetch_add(bytes_sent, Ordering::SeqCst);
+        Poll::Ready(Ok(()))
+    }
 }
