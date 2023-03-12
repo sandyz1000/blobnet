@@ -39,8 +39,7 @@ impl<P> Tracking<P> {
 #[async_trait]
 impl<P: Provider> Provider for Tracking<P> {
     async fn head(&self, hash: &str) -> Result<u64, Error> {
-        let result = self.inner.head(hash).await;
-        result
+        self.inner.head(hash).await
     }
 
     async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
@@ -49,8 +48,7 @@ impl<P: Provider> Provider for Tracking<P> {
     }
 
     async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
-        let result = self.inner.put(data).await;
-        result
+        self.inner.put(data).await
     }
 }
 
