@@ -19,3 +19,4 @@ cargo add blobnet      # add to your project
 This library is created by the team behind [Modal](https://modal.com/).
 
 - Eric Zhang ([@ekzhang1](https://twitter.com/ekzhang1)) – [Modal](https://modal.com/)
+- Jonathon Belotti ([@jonobelotti_IO](https://twitter.com/jonobelotti_IO)) – [Modal](https://modal.com/)
