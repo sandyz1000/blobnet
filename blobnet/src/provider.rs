@@ -436,6 +436,7 @@ struct CachedState<P> {
     pending_requests: Mutex<HashMap<RequestKey, PendingRequest>>,
     dir: PathBuf,
     pagesize: u64,
+    diskcache_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl<P> Cached<P> {
@@ -452,6 +453,7 @@ impl<P> Cached<P> {
                 pending_requests: Default::default(),
                 dir: dir.as_ref().to_owned(), // File system cache
                 pagesize,
+                diskcache_semaphore: tokio::sync::Semaphore::new(4).into(),
             }),
             prefetch_depth: 0,
         }
@@ -550,9 +552,16 @@ impl<P> CachedState<P> {
 
         // Place bytes in the file system cache.
         let read_buf = Cursor::new(bytes.clone());
-        task::spawn_blocking(move || {
-            if let Err(err) = atomic_copy(read_buf, &path) {
-                eprintln!("error writing {path:?} cache file: {err:?}");
+        let semaphore = self.diskcache_semaphore.clone();
+        tokio::spawn(async move {
+            if let Ok(_permit) = semaphore.acquire().await {
+                task::spawn_blocking(move || {
+                    if let Err(err) = atomic_copy(read_buf, &path) {
+                        eprintln!("error writing {path:?} cache file: {err:?}");
+                    }
+                })
+                .await
+                .ok();
             }
         });
 
