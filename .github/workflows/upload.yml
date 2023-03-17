@@ -5,11 +5,6 @@ on:
     tags:
       - "blobnet-v*.*.*"
 
-env:
-  AWS_DEFAULT_REGION: us-east-1
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
 jobs:
   upload:
     name: Upload binaries
@@ -19,18 +14,37 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
+      - run: sudo apt-get install -y g++-aarch64-linux-gnu libc6-dev-arm64-cross
+
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: stable
+          target: aarch64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo build --release --bin blobnet
 
+      - run: cargo build --release --bin blobnet --target aarch64-unknown-linux-gnu
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+
       - name: Install AWS CLI v2
         uses: unfor19/install-aws-cli-action@v1.0.3
 
-      - name: Upload binary
+      - name: Upload binaries
         run: |
-          aws s3 cp target/release/blobnet "s3://modal-artifacts/blobnet/blobnet-${GITHUB_REF#refs/tags/blobnet-v}"
+          PREFIX=s3://modal-artifacts/blobnet
+          VERSION="${GITHUB_REF#refs/tags/blobnet-v}"
+
+          aws s3 cp target/release/blobnet \
+            "$PREFIX/blobnet-$VERSION-x86_64-unknown-linux-gnu"
+          aws s3 cp target/aarch64-unknown-linux-gnu/release/blobnet \
+            "$PREFIX/blobnet-$VERSION-aarch64-unknown-linux-gnu"
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
