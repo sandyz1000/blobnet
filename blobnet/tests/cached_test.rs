@@ -74,9 +74,8 @@ async fn concurrent_cacheable_reads() -> Result<()> {
     let total_net_out_bytes = tracking_client.get_net_bytes_served.load(Ordering::SeqCst);
     assert!(
         total_net_out_bytes <= max_bytes_tolerated,
-        "duplicated network out bytes exceeded tolerance: {} > {}",
-        total_net_out_bytes,
-        max_bytes_tolerated
+        "duplicated network out bytes exceeded tolerance: {total_net_out_bytes} > \
+         {max_bytes_tolerated}",
     );
     Ok(())
 }
