@@ -28,9 +28,24 @@ use blobnet::provider::{Cached, Provider, Remote};
 use blobnet::{client::FileClient, drain, Error};
 use clap::Parser;
 use sha2::{Digest, Sha256};
+use tokio::runtime::Runtime;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let mut tempdirs: Vec<tempfile::TempDir> = Vec::new();
+
+    let runtime = Runtime::new()?;
+    runtime.block_on(run(&mut tempdirs))?;
+    drop(runtime);
+
+    println!("cleaning up directories");
+    for dir in tempdirs {
+        dir.close()?;
+    }
+
+    Ok(())
+}
+
+async fn run(tempdirs: &mut Vec<tempfile::TempDir>) -> Result<()> {
     let args = Args::parse();
 
     let data = str::repeat("abcdefghijklmnop", (args.file_size_bytes / 16_u32) as usize);
@@ -48,8 +63,6 @@ async fn main() -> Result<()> {
     }
 
     let pagesize = 1 << 21;
-
-    let mut tempdirs: Vec<tempfile::TempDir> = Vec::new();
 
     // Do one test read.
     let file_client = FileClient::new_http_with_pool(&args.origin, &args.secret, args.connections);
@@ -80,11 +93,6 @@ async fn main() -> Result<()> {
     let avg_thpt = (8 * n) as f64 / (1 << 30) as f64 / (avg_latency / 1_000_000_f64);
     println!("avg = {} us", avg_latency);
     println!("thpt = {:.2} Gbit/s", avg_thpt);
-
-    println!("cleaning up directories");
-    for dir in tempdirs {
-        dir.close()?;
-    }
 
     Ok(())
 }
