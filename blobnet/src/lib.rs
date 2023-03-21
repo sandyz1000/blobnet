@@ -150,6 +150,19 @@ pub async fn read_to_vec(mut stream: ReadStream<'_>) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Drains a [`ReadStream`] into the void, returning the total bytes read.
+pub async fn drain(mut stream: ReadStream<'_>) -> io::Result<u64> {
+    let mut buf = [0; 32 * 1024];
+    let mut n_read = 0;
+    loop {
+        let n = stream.read(&mut buf).await? as u64;
+        if n == 0 {
+            return Ok(n_read);
+        }
+        n_read += n;
+    }
+}
+
 /// Error type for results returned from blobnet.
 #[derive(Error, Debug)]
 pub enum Error {
