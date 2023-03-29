@@ -494,16 +494,6 @@ impl<P> CachedState<P> {
             return Ok(bytes);
         }
 
-        let key = hash_path(&hash)?;
-        let path = self.dir.join(format!("{key}/{n}"));
-        if let Ok(data) = fs::read(&path).await {
-            let bytes = Bytes::from(data);
-            self.page_cache
-                .lock()
-                .insert(hash.clone(), n, bytes.clone());
-            return Ok(bytes);
-        }
-
         // Check for pending requests to the same hash and offset and deduplicate them
         // if found, listening for the immediate following response.
         let key = (hash.clone(), n);
@@ -520,7 +510,7 @@ impl<P> CachedState<P> {
             }
         };
 
-        let result = match role {
+        match role {
             RequestRole::Waiter(mut rx) => {
                 match time::timeout(
                     Duration::from_millis(MAX_PENDING_REQUEST_WAIT_MS),
@@ -529,46 +519,52 @@ impl<P> CachedState<P> {
                 .await
                 {
                     Ok(result) => match result {
-                        Ok(r) => return r,
-                        Err(_) => return Err(anyhow!("pending request channel dropped").into()),
+                        Ok(r) => r,
+                        Err(_) => Err(anyhow!("pending request channel dropped").into()),
                     },
-                    Err(err) => {
-                        eprintln!("timeout waiting on pending request {key:?}: {err:?}");
+                    Err(_) => {
+                        eprintln!("timeout waiting on pending request {key:?}");
                         func().await
                     }
                 }
             }
             RequestRole::Sender(tx) => {
-                let result = func().await;
+                let diskcache_key = hash_path(&hash)?;
+                let path = self.dir.join(format!("{diskcache_key}/{n}"));
+                // Attempt fetch from diskcache first, falling back to function.
+                let (result, hit_diskcache) = if let Ok(data) = fs::read(&path).await {
+                    (Ok(Bytes::from(data)), true)
+                } else {
+                    (func().await, false)
+                };
+
+                if let Ok(bytes) = &result {
+                    // Populate in-memory and disk caches.
+                    if !hit_diskcache {
+                        let read_buf = Cursor::new(bytes.clone());
+                        let semaphore = self.diskcache_semaphore.clone();
+                        tokio::spawn(async move {
+                            if let Ok(_permit) = semaphore.acquire().await {
+                                task::spawn_blocking(move || {
+                                    if let Err(err) = atomic_copy(read_buf, &path) {
+                                        eprintln!("error writing {path:?} cache file: {err:?}");
+                                    }
+                                })
+                                .await
+                                .ok();
+                            }
+                        });
+                    }
+                    self.page_cache.lock().insert(hash, n, bytes.clone());
+                };
+
                 // Finish all blocked, pending requests.
                 if let Some(_rx) = self.pending_requests.lock().remove(&key) {
                     tx.send(result.clone()).ok();
                 }
                 result
             }
-        };
-
-        let bytes = result?;
-
-        // Place bytes in the file system cache.
-        let read_buf = Cursor::new(bytes.clone());
-        let semaphore = self.diskcache_semaphore.clone();
-        tokio::spawn(async move {
-            if let Ok(_permit) = semaphore.acquire().await {
-                task::spawn_blocking(move || {
-                    if let Err(err) = atomic_copy(read_buf, &path) {
-                        eprintln!("error writing {path:?} cache file: {err:?}");
-                    }
-                })
-                .await
-                .ok();
-            }
-        });
-
-        // Place bytes in the in-memory page cache.
-        self.page_cache.lock().insert(hash, n, bytes.clone());
-
-        Ok(bytes)
+        }
     }
 
     async fn cleaner(&self) {
