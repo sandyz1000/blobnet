@@ -66,16 +66,7 @@ async fn concurrent_cacheable_reads() -> Result<()> {
     }
     // Wait for all get requests to finish.
     while set.join_next().await.is_some() {}
-    // TODO(Jonathon): Deduplication is currently not perfect. There's still races
-    // where multiple requests hit the underlying provider before the Cached
-    // provider's page cache and disk cache are populated.
-    // So, for now, we set a max tolerance.
-    let max_bytes_tolerated = s1.len() * 16;
     let total_net_out_bytes = tracking_client.get_net_bytes_served.load(Ordering::SeqCst);
-    assert!(
-        total_net_out_bytes <= max_bytes_tolerated,
-        "duplicated network out bytes exceeded tolerance: {total_net_out_bytes} > \
-         {max_bytes_tolerated}",
-    );
+    assert_eq!(total_net_out_bytes, s1.len());
     Ok(())
 }
