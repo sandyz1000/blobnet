@@ -56,7 +56,17 @@ where
                 let config = Arc::clone(&config);
                 async {
                     let resp = handle(config, req).await;
-                    Ok::<_, Infallible>(resp.unwrap_or_else(|err_resp| err_resp))
+                    Ok::<_, Infallible>(resp.unwrap_or_else(|err_resp| {
+                        if err_resp.status() == StatusCode::INTERNAL_SERVER_ERROR {
+                            println!(
+                                "HTTP {} {:?} {:?}",
+                                err_resp.status().as_str(),
+                                err_resp.version(),
+                                err_resp.body(),
+                            );
+                        }
+                        err_resp
+                    }))
                 }
             }))
         }
