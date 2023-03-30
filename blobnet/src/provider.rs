@@ -5,6 +5,8 @@ use std::fs::File;
 use std::future::Future;
 use std::io::{self, Cursor, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -437,6 +439,18 @@ struct CachedState<P> {
     dir: PathBuf,
     pagesize: u64,
     diskcache_semaphore: Arc<tokio::sync::Semaphore>,
+    diskcache_pending_write_pages: Arc<AtomicU64>,
+    diskcache_pending_write_bytes: Arc<AtomicU64>,
+}
+
+/// Stats of `CachedState`
+#[non_exhaustive]
+pub struct CacheStats {
+    /// Number of pages pending writing to disk cache
+    pub pending_disk_write_pages: u64,
+
+    /// Bytes pending writing to disk cache
+    pub pending_disk_write_bytes: u64,
 }
 
 impl<P> Cached<P> {
@@ -454,6 +468,8 @@ impl<P> Cached<P> {
                 dir: dir.as_ref().to_owned(), // File system cache
                 pagesize,
                 diskcache_semaphore: tokio::sync::Semaphore::new(4).into(),
+                diskcache_pending_write_pages: Default::default(),
+                diskcache_pending_write_bytes: Default::default(),
             }),
             prefetch_depth: 0,
         }
@@ -476,6 +492,14 @@ impl<P> Cached<P> {
     pub fn cleaner(&self) -> impl Future<Output = ()> {
         let state = Arc::clone(&self.state);
         async move { state.cleaner().await }
+    }
+
+    /// Get a snapshot of current stats like volume of pending disk writes.
+    pub fn stats(&self) -> CacheStats {
+        CacheStats {
+            pending_disk_write_bytes: self.state.diskcache_pending_write_bytes.load(Relaxed),
+            pending_disk_write_pages: self.state.diskcache_pending_write_pages.load(Relaxed),
+        }
     }
 }
 
@@ -543,6 +567,11 @@ impl<P> CachedState<P> {
                     if !hit_diskcache {
                         let read_buf = Cursor::new(bytes.clone());
                         let semaphore = self.diskcache_semaphore.clone();
+                        let pending_pages = self.diskcache_pending_write_pages.clone();
+                        let pending_bytes = self.diskcache_pending_write_bytes.clone();
+                        let bytes_len = bytes.len() as u64;
+                        pending_pages.fetch_add(1, Relaxed);
+                        pending_bytes.fetch_add(bytes_len, Relaxed);
                         tokio::spawn(async move {
                             if let Ok(_permit) = semaphore.acquire().await {
                                 task::spawn_blocking(move || {
@@ -552,7 +581,9 @@ impl<P> CachedState<P> {
                                 })
                                 .await
                                 .ok();
-                            }
+                            };
+                            pending_pages.fetch_sub(1, Relaxed);
+                            pending_bytes.fetch_sub(bytes_len, Relaxed);
                         });
                     }
                     self.page_cache.lock().insert(hash, n, bytes.clone());
