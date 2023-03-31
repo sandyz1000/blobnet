@@ -4,6 +4,7 @@ use std::time::Instant;
 use blobnet::client::FileClient;
 use blobnet::provider::{self, Provider};
 use clap::Parser;
+use tikv_jemallocator::Jemalloc;
 use tokio::io::AsyncReadExt;
 use tokio::runtime::Runtime;
 
@@ -25,6 +26,9 @@ struct Args {
     #[clap(short, long, value_parser)]
     cache_dir: Option<PathBuf>,
 }
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 async fn run_test(
     label: &str,

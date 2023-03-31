@@ -8,6 +8,7 @@ use clap::Parser;
 use hyper::server::conn::AddrIncoming;
 use hyperlocal::SocketIncoming;
 use shutdown::Shutdown;
+use tikv_jemallocator::Jemalloc;
 
 /// Low-latency, content-addressed file server with a non-volatile cache.
 ///
@@ -46,6 +47,9 @@ pub struct Cli {
     pub unix_socket: Option<PathBuf>,
 }
 
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 /// Attempt to parse a provider from CLI argument.
 async fn parse_provider(source: &str) -> Result<Box<dyn Provider>> {
     let (kind, arg) = source
@@ -65,6 +69,8 @@ async fn parse_provider(source: &str) -> Result<Box<dyn Provider>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tikv_jemalloc_ctl::background_thread::write(true).unwrap();
+
     let args = Cli::parse();
 
     let mut provider = parse_provider(&args.source).await?;

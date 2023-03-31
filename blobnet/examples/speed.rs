@@ -58,8 +58,12 @@ use blobnet::{client::FileClient, drain, Error};
 use clap::Parser;
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
+use tikv_jemallocator::Jemalloc;
 use tokio::task;
 use tokio::time::sleep;
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<()> {

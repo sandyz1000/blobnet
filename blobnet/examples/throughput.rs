@@ -1,6 +1,7 @@
 use anyhow::Result;
 use blobnet::{client::FileClient, read_to_vec};
 use clap::Parser;
+use tikv_jemallocator::Jemalloc;
 use tokio::task;
 
 /// Create client connections against a blobnet server. Useful for measuring
@@ -16,6 +17,9 @@ struct Args {
     /// Number of clients to use.
     n_tasks: u32,
 }
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<()> {

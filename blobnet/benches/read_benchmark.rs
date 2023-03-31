@@ -9,9 +9,13 @@ use blobnet::{
 };
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode};
 use hyper::body::Bytes;
+use tikv_jemallocator::Jemalloc;
 use tokio::runtime::Runtime;
 use tokio_stream::StreamExt;
 use tokio_util::io::{ReaderStream, StreamReader};
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 /// Insert 100 blobs of 1KB each, then read each 10 times.
 async fn insert_read_1k(provider: impl Provider) -> anyhow::Result<()> {
