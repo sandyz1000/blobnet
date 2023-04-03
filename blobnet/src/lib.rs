@@ -150,6 +150,19 @@ pub async fn read_to_vec(mut stream: ReadStream<'_>) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+const READ_TO_END_VEC_MARGIN: usize = 32;
+
+/// Helper function to collect `len` bytes from a [`ReadStream`] into a byte
+/// vector.
+pub async fn read_to_vec_with_len(mut stream: ReadStream<'_>, len: usize) -> io::Result<Vec<u8>> {
+    // https://github.com/tokio-rs/tokio/issues/5594
+    let capacity = len + READ_TO_END_VEC_MARGIN;
+    // Preallocate the buf to avoid expensive realloc
+    let mut buf = Vec::with_capacity(capacity);
+    stream.read_to_end(&mut buf).await?;
+    Ok(buf)
+}
+
 /// Drains a [`ReadStream`] into the void, returning the total bytes read.
 pub async fn drain(mut stream: ReadStream<'_>) -> io::Result<u64> {
     let mut buf = [0; 32 * 1024];
@@ -224,4 +237,39 @@ fn make_resp(code: StatusCode, msg: impl Into<String>) -> Response<Body> {
         .status(code)
         .body(Body::from(msg.into() + "\n"))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+
+    use tokio::io::AsyncWriteExt;
+    use tokio::task::JoinHandle;
+
+    use crate::{read_to_vec_with_len, READ_TO_END_VEC_MARGIN};
+
+    const HELLO: &[u8; 5] = b"hello";
+
+    /// Verify that https://github.com/tokio-rs/tokio/issues/5594 has not gotten worse which would
+    /// neuter the workaround in `read_to_vec_with_len`.
+    #[tokio::test]
+    async fn read_to_vec_with_len_stays_within_margin() -> tokio::io::Result<()> {
+        // Allocate pipe with a single byte capacity to force reading and writing of a
+        // single byte at a time
+        let (mut w, r) = tokio::io::duplex(1);
+        let r = Box::pin(r);
+
+        // Start reading
+        let f: JoinHandle<std::io::Result<Vec<u8>>> =
+            tokio::spawn(async move { Ok(read_to_vec_with_len(r, HELLO.len()).await?) });
+
+        // Write "hello"
+        w.write_all(HELLO.as_slice()).await?;
+        drop(w);
+
+        // Verify that the resulting buf does not have larger capacity than expected
+        let read = f.await?.unwrap();
+        assert_eq!(read, HELLO.to_vec());
+        assert_eq!(read.capacity(), HELLO.len() + READ_TO_END_VEC_MARGIN);
+        Ok(())
+    }
 }
