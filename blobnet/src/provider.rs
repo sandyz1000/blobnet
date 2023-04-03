@@ -408,6 +408,11 @@ impl PageCache {
             Entry::Vacant(_) => None,
         }
     }
+
+    /// Get an entry from the page cache, without LRU eviction.
+    fn peek(&mut self, hash: String, n: u64) -> Option<Bytes> {
+        self.mapping.get(&(hash, n)).map(Bytes::clone)
+    }
 }
 
 impl Default for PageCache {
@@ -438,9 +443,9 @@ struct CachedState<P> {
     pending_requests: Mutex<HashMap<RequestKey, PendingRequest>>,
     dir: PathBuf,
     pagesize: u64,
-    diskcache_semaphore: Arc<tokio::sync::Semaphore>,
-    diskcache_pending_write_pages: Arc<AtomicU64>,
-    diskcache_pending_write_bytes: Arc<AtomicU64>,
+    diskcache_semaphore: tokio::sync::Semaphore,
+    diskcache_pending_write_pages: AtomicU64,
+    diskcache_pending_write_bytes: AtomicU64,
 }
 
 /// Stats of `CachedState`
@@ -453,7 +458,7 @@ pub struct CacheStats {
     pub pending_disk_write_bytes: u64,
 }
 
-impl<P> Cached<P> {
+impl<P: Provider + 'static> Cached<P> {
     /// Create a new cache wrapper for the given provider.
     ///
     /// Set the page size in bytes for cached chunks, as well as the directory
@@ -467,7 +472,7 @@ impl<P> Cached<P> {
                 pending_requests: Default::default(),
                 dir: dir.as_ref().to_owned(), // File system cache
                 pagesize,
-                diskcache_semaphore: tokio::sync::Semaphore::new(4).into(),
+                diskcache_semaphore: tokio::sync::Semaphore::new(1),
                 diskcache_pending_write_pages: Default::default(),
                 diskcache_pending_write_bytes: Default::default(),
             }),
@@ -503,16 +508,21 @@ impl<P> Cached<P> {
     }
 }
 
-impl<P> CachedState<P> {
+impl<P: Provider + 'static> CachedState<P> {
     /// Run a function with both file system and memory caches.
     ///
     /// The first cache page of each hash stores HEAD metadata. After that,
     /// index `n` stores the byte range from `(n - 1) * pagesize` to `n *
     /// pagesize`.
-    async fn with_cache<F, Out>(&self, hash: String, n: u64, func: F) -> Result<Bytes, Error>
+    async fn with_cache<F, Out>(
+        self: &Arc<Self>,
+        hash: String,
+        n: u64,
+        func: F,
+    ) -> Result<Bytes, Error>
     where
-        F: FnOnce() -> Out,
-        Out: Future<Output = Result<Bytes, Error>>,
+        F: (Fn(Arc<Self>, String, u64) -> Out) + Send + 'static,
+        Out: Future<Output = Result<Bytes, Error>> + Send,
     {
         if let Some(bytes) = self.page_cache.lock().get(hash.clone(), n) {
             return Ok(bytes);
@@ -548,45 +558,27 @@ impl<P> CachedState<P> {
                     },
                     Err(_) => {
                         eprintln!("timeout waiting on pending request {key:?}");
-                        func().await
+                        func(self.clone(), hash.clone(), n).await
                     }
                 }
             }
             RequestRole::Sender(tx) => {
-                let diskcache_key = hash_path(&hash)?;
-                let path = self.dir.join(format!("{diskcache_key}/{n}"));
+                let path = self.page_disk_path(&hash, n)?;
                 // Attempt fetch from diskcache first, falling back to function.
                 let (result, hit_diskcache) = if let Ok(data) = fs::read(&path).await {
                     (Ok(Bytes::from(data)), true)
                 } else {
-                    (func().await, false)
+                    (func(self.clone(), hash.clone(), n).await, false)
                 };
 
+                // Populate in-memory and disk caches.
                 if let Ok(bytes) = &result {
-                    // Populate in-memory and disk caches.
+                    self.page_cache
+                        .lock()
+                        .insert(hash.clone(), n, bytes.clone());
                     if !hit_diskcache {
-                        let read_buf = Cursor::new(bytes.clone());
-                        let semaphore = self.diskcache_semaphore.clone();
-                        let pending_pages = self.diskcache_pending_write_pages.clone();
-                        let pending_bytes = self.diskcache_pending_write_bytes.clone();
-                        let bytes_len = bytes.len() as u64;
-                        pending_pages.fetch_add(1, Relaxed);
-                        pending_bytes.fetch_add(bytes_len, Relaxed);
-                        tokio::spawn(async move {
-                            if let Ok(_permit) = semaphore.acquire().await {
-                                task::spawn_blocking(move || {
-                                    if let Err(err) = atomic_copy(read_buf, &path) {
-                                        eprintln!("error writing {path:?} cache file: {err:?}");
-                                    }
-                                })
-                                .await
-                                .ok();
-                            };
-                            pending_pages.fetch_sub(1, Relaxed);
-                            pending_bytes.fetch_sub(bytes_len, Relaxed);
-                        });
+                        self.populate_disk_cache(&hash, n, func, bytes.len() as u64);
                     }
-                    self.page_cache.lock().insert(hash, n, bytes.clone());
                 };
 
                 // Finish all blocked, pending requests.
@@ -596,6 +588,77 @@ impl<P> CachedState<P> {
                 result
             }
         }
+    }
+
+    /// Asynchronously populate the disk cache with the specified hash chunk
+    fn populate_disk_cache<F, Out>(self: &Arc<Self>, hash: &str, n: u64, func: F, bytes_len: u64)
+    where
+        F: (Fn(Arc<Self>, String, u64) -> Out) + Send + 'static,
+        Out: Future<Output = Result<Bytes, Error>> + Send,
+    {
+        let hash = hash.to_owned();
+        let state = self.clone();
+
+        self.diskcache_pending_write_pages.fetch_add(1, Relaxed);
+        self.diskcache_pending_write_bytes
+            .fetch_add(bytes_len, Relaxed);
+
+        tokio::spawn(async move {
+            // Throttle disk writes to not impact user read request latency
+            if let Ok(_permit) = state.diskcache_semaphore.acquire().await {
+                let path = match state.page_disk_path(&hash, n) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        eprintln!("error computing page disk path: {err:?}");
+                        return;
+                    }
+                };
+
+                // Bail if the page is already on disk
+                if fs::metadata(&path).await.is_ok() {
+                    return;
+                }
+
+                // Get the page from page cache if present
+                let bytes = state.page_cache.lock().peek(hash.clone(), n);
+                let bytes = if let Some(bytes) = bytes {
+                    Some(bytes)
+                } else {
+                    // Fall back to re-fetching the page
+                    let f = func(state.clone(), hash, n);
+                    match f.await {
+                        Ok(r) => Some(r),
+                        Err(err) => {
+                            eprintln!("error getting {path:?} cache contents: {err:?}");
+                            None
+                        }
+                    }
+                };
+
+                // Write the page to disk
+                if let Some(bytes) = bytes {
+                    task::spawn_blocking(move || {
+                        let read_buf = Cursor::new(bytes);
+                        if let Err(err) = atomic_copy(read_buf, &path) {
+                            eprintln!("error writing {path:?} cache file: {err:?}");
+                        }
+                    })
+                    .await
+                    .ok();
+                }
+            };
+
+            state.diskcache_pending_write_pages.fetch_sub(1, Relaxed);
+            state
+                .diskcache_pending_write_bytes
+                .fetch_sub(bytes_len, Relaxed);
+        });
+    }
+
+    fn page_disk_path(self: &Arc<Self>, hash: &str, n: u64) -> Result<PathBuf, Error> {
+        let diskcache_key = hash_path(hash)?;
+        let path = self.dir.join(format!("{diskcache_key}/{n}"));
+        Ok(path)
     }
 
     async fn cleaner(&self) {
@@ -619,10 +682,10 @@ impl<P> CachedState<P> {
 
 impl<P: Provider + 'static> CachedState<P> {
     /// Read the size of a file, with caching.
-    async fn get_cached_size(&self, hash: &str) -> Result<u64, Error> {
+    async fn get_cached_size(self: &Arc<Self>, hash: &str) -> Result<u64, Error> {
         let size = self
-            .with_cache(hash.into(), 0, || async {
-                let size = self.inner.head(hash).await?;
+            .with_cache(hash.into(), 0, |state, hash, _| async move {
+                let size = state.inner.head(&hash).await?;
                 Ok(Bytes::from_iter(size.to_le_bytes()))
             })
             .await?;
@@ -632,14 +695,14 @@ impl<P: Provider + 'static> CachedState<P> {
     }
 
     /// Read a chunk of data, with caching.
-    async fn get_single_cached_chunk(&self, hash: &str, n: u64) -> Result<Bytes, Error> {
+    async fn get_single_cached_chunk(self: &Arc<Self>, hash: &str, n: u64) -> Result<Bytes, Error> {
         assert!(n > 0, "chunks of file data start at 1");
 
         let lo = (n - 1) * self.pagesize;
         let hi = n * self.pagesize;
 
-        self.with_cache(hash.into(), n, move || async move {
-            Ok(read_to_vec(self.inner.get(hash, Some((lo, hi))).await?)
+        self.with_cache(hash.into(), n, move |state, hash, _| async move {
+            Ok(read_to_vec(state.inner.get(&hash, Some((lo, hi))).await?)
                 .await?
                 .into())
         })
