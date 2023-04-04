@@ -607,17 +607,14 @@ impl<P: Provider + 'static> CachedState<P> {
             // Throttle disk writes to not impact user read request latency
             if let Ok(_permit) = state.diskcache_semaphore.acquire().await {
                 let path = match state.page_disk_path(&hash, n) {
+                    // Bail if the page is already on disk
+                    Ok(path) if fs::metadata(&path).await.is_ok() => return,
                     Ok(path) => path,
                     Err(err) => {
                         eprintln!("error computing page disk path: {err:?}");
                         return;
                     }
                 };
-
-                // Bail if the page is already on disk
-                if fs::metadata(&path).await.is_ok() {
-                    return;
-                }
 
                 // Get the page from page cache if present
                 let bytes = state.page_cache.lock().peek(hash.clone(), n);
@@ -626,13 +623,12 @@ impl<P: Provider + 'static> CachedState<P> {
                 } else {
                     // Fall back to re-fetching the page
                     let f = func(state.clone(), hash, n);
-                    match f.await {
-                        Ok(r) => Some(r),
-                        Err(err) => {
+                    f.await
+                        .map_err(|err| {
                             eprintln!("error getting {path:?} cache contents: {err:?}");
-                            None
-                        }
-                    }
+                            err
+                        })
+                        .ok()
                 };
 
                 // Write the page to disk
