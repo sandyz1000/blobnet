@@ -763,7 +763,7 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         let reached_end = (first_chunk.len() as u64) < self.state.pagesize;
         let first_chunk = first_chunk.slice(initial_offset as usize..);
         // If it fits in a single chunk, just return the data immediately.
-        if reached_end || first_chunk.len() as u64 > end - start {
+        if reached_end || first_chunk.len() as u64 >= end - start {
             let total_len = first_chunk.len().min((end - start) as usize);
             return Ok(Box::pin(Cursor::new(first_chunk.slice(..total_len))));
         }
