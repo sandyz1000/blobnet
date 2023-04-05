@@ -54,7 +54,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use blobnet::provider::{Cached, Provider, Remote};
-use blobnet::{client::FileClient, drain, Error};
+use blobnet::{client::FileClient, drain_read, Error};
 use clap::Parser;
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
@@ -201,7 +201,7 @@ async fn fetch(
         let task = task::spawn(async move {
             let range = Some((i * page_size, ((i + 1) * page_size)));
             let stream = client.get(&hash, range).await.unwrap();
-            drain(stream).await.unwrap()
+            drain_read(stream).await.unwrap()
         });
         tasks.push_back(task);
     }

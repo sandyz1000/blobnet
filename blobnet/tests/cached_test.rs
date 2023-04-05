@@ -2,11 +2,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Result;
-use blobnet::provider;
+use blobnet::client::FileClient;
 use blobnet::provider::Provider;
 use blobnet::server::{listen, Config};
 use blobnet::test_provider;
-use blobnet::{client::FileClient, read_to_vec};
+use blobnet::{provider, read_to_bytes};
 use hyper::client::HttpConnector;
 use hyper::server::conn::AddrIncoming;
 use tempfile::tempdir;
@@ -61,7 +61,7 @@ async fn concurrent_cacheable_reads() -> Result<()> {
         let client = cached_provider.clone();
         set.spawn(async move {
             let stream = (client.get(&h1, None).await).unwrap();
-            let _ = read_to_vec(stream).await.unwrap();
+            let _ = read_to_bytes(stream).await.unwrap();
         });
     }
     // Wait for all get requests to finish.

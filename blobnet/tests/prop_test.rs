@@ -4,7 +4,7 @@ use std::path::Path;
 
 use blobnet::{
     provider::{Cached, LocalDir, Memory, Provider},
-    read_to_vec, Error,
+    read_to_bytes, Error,
 };
 use quickcheck::quickcheck;
 
@@ -48,10 +48,10 @@ async fn run_cached_comparison(
         let r4 = ldir_cached.get(&h1, range).await;
 
         if r1.is_ok() {
-            let c1 = read_to_vec(r1?).await?;
-            let c2 = read_to_vec(r2?).await?;
-            let c3 = read_to_vec(r3?).await?;
-            let c4 = read_to_vec(r4?).await?;
+            let c1 = read_to_bytes(r1?).await?;
+            let c2 = read_to_bytes(r2?).await?;
+            let c3 = read_to_bytes(r3?).await?;
+            let c4 = read_to_bytes(r4?).await?;
             c1 == c2 && c1 == c3 && c1 == c4
         } else {
             r2.is_err() && r3.is_err() && r4.is_err()

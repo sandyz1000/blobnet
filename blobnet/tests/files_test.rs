@@ -1,7 +1,7 @@
 use anyhow::Result;
 use blobnet::client::FileClient;
 use blobnet::server::{listen, Config};
-use blobnet::{provider, ReadStream};
+use blobnet::{provider, BlobRead, ReadStream};
 use hyper::{body::Bytes, server::conn::AddrIncoming, Body};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
@@ -27,8 +27,9 @@ async fn spawn_temp_server() -> Result<String> {
     Ok(format!("http://{addr}"))
 }
 
-async fn eat(mut stream: ReadStream<'static>) -> Result<String> {
+async fn eat(read: BlobRead<'static>) -> Result<String> {
     let mut buf = String::new();
+    let mut stream: ReadStream = BlobRead::into(read);
     stream.read_to_string(&mut buf).await?;
     Ok(buf)
 }
@@ -161,7 +162,7 @@ async fn large_50mb_stream() -> Result<()> {
     assert!(client.get(&h1, Some((50000001, 50000001))).await.is_ok());
 
     // Make sure that we can stream a range of the entire file without any issues.
-    let mut entire_file = client.get(&h1, None).await?;
+    let mut entire_file: ReadStream = client.get(&h1, None).await?.into();
     let mut buf = vec![0; 1 << 22];
     entire_file.read_exact(&mut buf).await?;
     assert!(buf.starts_with(b"aaaaaaaaaaaaaaaaaaaaaaaa"));

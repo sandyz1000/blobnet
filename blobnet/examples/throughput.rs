@@ -1,5 +1,5 @@
 use anyhow::Result;
-use blobnet::{client::FileClient, read_to_vec};
+use blobnet::{client::FileClient, read_to_bytes};
 use clap::Parser;
 use tikv_jemallocator::Jemalloc;
 use tokio::task;
@@ -50,6 +50,6 @@ async fn main() -> Result<()> {
 async fn repeat_requests(origin: String, secret: String, hash: String) -> Result<()> {
     let client = FileClient::new_http(&origin, &secret);
     loop {
-        read_to_vec(client.get(&hash, None).await?).await?;
+        read_to_bytes(client.get(&hash, None).await?).await?;
     }
 }

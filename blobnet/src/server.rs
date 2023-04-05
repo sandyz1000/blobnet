@@ -101,7 +101,7 @@ async fn handle(config: Arc<Config>, req: Request<Body>) -> Result<Response<Body
             let range = req.headers().get(HEADER_RANGE).and_then(parse_range_header);
             let hash = get_hash(path)?;
             let reader = config.provider.get(hash, range).await?;
-            Ok(Response::new(stream_body(reader)))
+            Ok(Response::new(stream_body(reader.into())))
         }
         (&Method::PUT, "/") => {
             let body = req.into_body();

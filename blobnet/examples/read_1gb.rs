@@ -37,7 +37,7 @@ async fn run_test(
     provider: impl Provider,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
-    let data = blobnet::read_to_vec(provider.get(hash, Some((0, bytes))).await?).await?;
+    let data = blobnet::read_to_bytes(provider.get(hash, Some((0, bytes))).await?).await?;
     let elapsed = start.elapsed();
     println!("read {label} in {elapsed:?}");
     println!(

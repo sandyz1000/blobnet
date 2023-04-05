@@ -13,7 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::io::AsyncRead;
 
-use crate::{provider::Provider, BlobRange, Error, ReadStream};
+use crate::{provider::Provider, BlobRange, BlobRead, Error, ReadStream};
 
 /// Tracks network out bytes served by `get` requests.
 pub struct Tracking<P> {
@@ -31,8 +31,11 @@ impl<P> Tracking<P> {
     }
 
     /// Wrap a stream, introducing tracking of bytes sent.
-    fn wrap_tracking<'a>(&self, data: ReadStream<'a>) -> ReadStream<'a> {
-        Box::pin(TrackingStream::new(data, self.get_net_bytes_served.clone()))
+    fn wrap_tracking<'a>(&self, data: BlobRead<'a>) -> BlobRead<'a> {
+        BlobRead::from_stream(TrackingStream::new(
+            data.into(),
+            self.get_net_bytes_served.clone(),
+        ))
     }
 }
 
@@ -42,7 +45,7 @@ impl<P: Provider> Provider for Tracking<P> {
         self.inner.head(hash).await
     }
 
-    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error> {
         let result = self.inner.get(hash, range).await;
         Ok(self.wrap_tracking(result?))
     }
@@ -95,11 +98,11 @@ impl<P: Provider> Provider for Delayed<P> {
         result
     }
 
-    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error> {
         wait(0.5 * self.base_delay).await;
         let result = self.inner.get(hash, range).await;
         wait(0.5 * self.base_delay).await;
-        Ok(self.wrap_throttle(result?))
+        Ok(BlobRead::from_stream(self.wrap_throttle(result?.into())))
     }
 
     async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {

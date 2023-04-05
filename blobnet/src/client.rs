@@ -14,7 +14,7 @@ use crate::headers::{HEADER_FILE_LENGTH, HEADER_RANGE, HEADER_SECRET};
 #[cfg(doc)]
 use crate::provider::Remote;
 use crate::utils::body_stream;
-use crate::{BlobRange, Error, ReadStream};
+use crate::{BlobRange, BlobRead, Error};
 
 /// hyper's client strictly maintains a single HTTP/2 connection
 /// to a HOST:PORT destination, multiplexing new HTTP requests onto
@@ -156,7 +156,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
     }
 
     /// Read a range of bytes from a file.
-    pub async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
+    pub async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error> {
         let make_req = || async {
             let mut req = Request::builder()
                 .method("GET")
@@ -168,7 +168,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
             Ok(req.body(Body::empty())?)
         };
         let (_, body) = self.request_with_retry(make_req).await?;
-        Ok(body_stream(body))
+        Ok(BlobRead::from_stream(body_stream(body)))
     }
 
     /// Put a stream of data to the server, returning the hash ID if successful.

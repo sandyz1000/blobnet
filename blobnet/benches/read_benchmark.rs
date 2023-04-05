@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 
 use blobnet::{
     provider::{self, Provider},
-    read_to_vec,
+    read_to_bytes,
     test_provider::Delayed,
+    ReadStream,
 };
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode};
 use hyper::body::Bytes;
@@ -29,7 +30,7 @@ async fn insert_read_1k(provider: impl Provider) -> anyhow::Result<()> {
     for _ in 0..10 {
         for hash in &hashes {
             let stream = provider.get(hash, None).await?;
-            black_box(read_to_vec(stream).await?);
+            black_box(read_to_bytes(stream).await?);
         }
     }
     Ok(())
@@ -110,7 +111,8 @@ async fn image_delayed(
     let provider = provider::Cached::new(provider, cache, 1 << 21);
 
     for hash in hashes {
-        let mut stream = ReaderStream::with_capacity(provider.get(hash, None).await?, 1 << 21);
+        let stream: ReadStream = provider.get(hash, None).await?.into();
+        let mut stream = ReaderStream::with_capacity(stream, 1 << 21);
         while let Some(bytes) = stream.next().await {
             black_box(bytes?);
         }

@@ -110,9 +110,11 @@
 #![warn(missing_docs)]
 
 use std::io;
+use std::io::Cursor;
 use std::pin::Pin;
 
 use anyhow::anyhow;
+use bytes::Bytes;
 use hyper::{Body, Response, StatusCode};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -143,6 +145,35 @@ type BlobRange = Option<(u64, u64)>;
 /// A stream of bytes from some data source.
 pub type ReadStream<'a> = Pin<Box<dyn AsyncRead + Send + 'a>>;
 
+/// A buffer or stream of bytes from some data source.
+pub enum BlobRead<'a> {
+    /// A buffer of bytes
+    Bytes(Bytes),
+
+    /// A stream of bytes
+    Stream(ReadStream<'a>),
+}
+
+/// Factory methods for `BlobRead`
+impl<'a> BlobRead<'a> {
+    fn from_bytes(value: Bytes) -> BlobRead<'a> {
+        BlobRead::Bytes(value)
+    }
+
+    fn from_stream<T: AsyncRead + Send + 'a>(value: T) -> BlobRead<'a> {
+        BlobRead::Stream(Box::pin(value))
+    }
+}
+
+impl<'a> From<BlobRead<'a>> for ReadStream<'a> {
+    fn from(val: BlobRead<'a>) -> Self {
+        match val {
+            BlobRead::Bytes(bytes) => Box::pin(Cursor::new(bytes)),
+            BlobRead::Stream(stream) => stream,
+        }
+    }
+}
+
 /// Helper function to collect a [`ReadStream`] into a byte vector.
 pub async fn read_to_vec(mut stream: ReadStream<'_>) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
@@ -161,6 +192,50 @@ pub async fn read_to_vec_with_len(mut stream: ReadStream<'_>, len: usize) -> io:
     let mut buf = Vec::with_capacity(capacity);
     stream.read_to_end(&mut buf).await?;
     Ok(buf)
+}
+
+/// Helper function to collect a [`BlobRead`] into a `Bytes` buffer.
+pub async fn read_to_bytes(read: BlobRead<'_>) -> io::Result<Bytes> {
+    match read {
+        BlobRead::Bytes(bytes) => Ok(bytes),
+        BlobRead::Stream(stream) => Ok(Bytes::from(read_to_vec(stream).await?)),
+    }
+}
+
+/// Helper function to collect a [`BlobRead`] into a `Bytes` buffer.
+pub async fn read_to_bytes_with_len(read: BlobRead<'_>, len: usize) -> io::Result<Bytes> {
+    match read {
+        BlobRead::Bytes(bytes) => Ok(bytes),
+        BlobRead::Stream(stream) => Ok(Bytes::from(read_to_vec_with_len(stream, len).await?)),
+    }
+}
+
+/// Helper function to collect a [`BlobRead`] into a `Bytes` buffer, shrinking
+/// the buffer to fit if necessary. This can be useful for
+/// long-lived buffers to avoid inflating memory usage.
+pub async fn read_to_bytes_with_fit(read: BlobRead<'_>, len: usize) -> io::Result<Bytes> {
+    match read {
+        BlobRead::Bytes(bytes) => Ok(Bytes::from(fit(bytes.to_vec()))),
+        BlobRead::Stream(stream) => Ok(Bytes::from(fit(read_to_vec_with_len(stream, len).await?))),
+    }
+}
+
+/// Shrink a vec to fit if capacity is more than 25% greater than len. This can
+/// be useful for long-lived vectors to avoid inflating memory usage.
+fn fit(mut buf: Vec<u8>) -> Vec<u8> {
+    // Shrink if the buffer capacity is wasting more than 25%
+    if buf.capacity() > buf.len() + (buf.len() / 4) {
+        buf.shrink_to_fit();
+    }
+    buf
+}
+
+/// Drains a [`BlobRead`] into the void, returning the total bytes read.
+pub async fn drain_read(read: BlobRead<'_>) -> io::Result<u64> {
+    match read {
+        BlobRead::Bytes(bytes) => Ok(bytes.len() as u64),
+        BlobRead::Stream(stream) => drain(stream).await,
+    }
 }
 
 /// Drains a [`ReadStream`] into the void, returning the total bytes read.

@@ -29,7 +29,7 @@ use tokio_util::io::StreamReader;
 use crate::client::FileClient;
 use crate::fast_aio::file_reader;
 use crate::utils::{atomic_copy, hash_path, stream_body};
-use crate::{read_to_vec, BlobRange, Error, ReadStream};
+use crate::{read_to_bytes_with_fit, BlobRange, BlobRead, Error, ReadStream};
 
 /// Specifies a storage backend for the blobnet service.
 ///
@@ -56,9 +56,9 @@ pub trait Provider: Send + Sync {
     /// Equivalent to:
     ///
     /// ```ignore
-    /// async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream<'static>, Error>;
+    /// async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Read<'static>, Error>;
     /// ```
-    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error>;
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error>;
 
     /// Adds a binary blob to storage, returning its hash.
     ///
@@ -94,7 +94,7 @@ impl Provider for Memory {
         Ok(bytes.len() as u64)
     }
 
-    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error> {
         check_range(range)?;
         let data = self.data.read();
         let mut bytes = match data.get(hash) {
@@ -103,11 +103,11 @@ impl Provider for Memory {
         };
         if let Some((start, end)) = range {
             if start > bytes.len() as u64 {
-                return Ok(empty_stream());
+                return Ok(empty_read());
             }
             bytes = bytes.slice(start as usize..bytes.len().min(end as usize));
         }
-        Ok(Box::pin(Cursor::new(bytes)))
+        Ok(BlobRead::from_bytes(bytes))
     }
 
     async fn put(&self, mut data: ReadStream<'_>) -> Result<String, Error> {
@@ -164,14 +164,14 @@ impl Provider for S3 {
         }
     }
 
-    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error> {
         check_range(range)?;
 
         if matches!(range, Some((s, e)) if s == e) {
             // Special case: The range has length 0, and S3 doesn't support
             // zero-length ranges directly, so we need a different request.
             self.head(hash).await?;
-            return Ok(empty_stream());
+            return Ok(empty_read());
         }
 
         let key = hash_path(hash)?;
@@ -185,7 +185,7 @@ impl Provider for S3 {
             .await;
 
         match result {
-            Ok(resp) => Ok(Box::pin(resp.body.into_async_read())),
+            Ok(resp) => Ok(BlobRead::from_stream(resp.body.into_async_read())),
             Err(SdkError::ServiceError { err, .. })
                 if matches!(err.kind, GetObjectErrorKind::NoSuchKey(_)) =>
             {
@@ -195,7 +195,7 @@ impl Provider for S3 {
             Err(SdkError::ServiceError { err, .. }) if err.code() == Some("InvalidRange") => {
                 // Edge case: S3 throws errors if the start of the range is at or after the
                 // end of the file, but we want to support this for consistency.
-                Ok(empty_stream())
+                Ok(empty_read())
             }
             Err(err) => Err(Error::Internal(err.into())),
         }
@@ -245,7 +245,7 @@ impl Provider for LocalDir {
         }
     }
 
-    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error> {
         check_range(range)?;
         let key = hash_path(hash)?;
         let path = self.dir.join(key);
@@ -254,7 +254,7 @@ impl Provider for LocalDir {
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Err(Error::NotFound),
             Err(err) => return Err(err.into()),
         };
-        Ok(file_reader(file, range))
+        Ok(BlobRead::Stream(file_reader(file, range)))
     }
 
     async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
@@ -286,7 +286,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
         self.client.head(hash).await
     }
 
-    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error> {
         self.client.get(hash, range).await
     }
 
@@ -325,8 +325,8 @@ fn check_range(range: BlobRange) -> Result<(), Error> {
     }
 }
 
-fn empty_stream() -> ReadStream<'static> {
-    Box::pin(b"" as &[u8])
+fn empty_read() -> BlobRead<'static> {
+    BlobRead::from_bytes(Bytes::from_static(b"" as &[u8]))
 }
 
 // A pair of providers is also a provider, acting as a fallback.
@@ -342,7 +342,7 @@ impl<P1: Provider, P2: Provider> Provider for (P1, P2) {
         }
     }
 
-    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error> {
         match self.0.get(hash, range).await {
             Ok(res) => Ok(res),
             Err(_) => self.1.get(hash, range).await,
@@ -691,16 +691,21 @@ impl<P: Provider + 'static> CachedState<P> {
     }
 
     /// Read a chunk of data, with caching.
-    async fn get_single_cached_chunk(self: &Arc<Self>, hash: &str, n: u64) -> Result<Bytes, Error> {
+    async fn get_single_cached_chunk(
+        self: &Arc<Self>,
+        hash: &str,
+        n: u64,
+        len: u64,
+    ) -> Result<Bytes, Error> {
         assert!(n > 0, "chunks of file data start at 1");
 
         let lo = (n - 1) * self.pagesize;
         let hi = n * self.pagesize;
 
         self.with_cache(hash.into(), n, move |state, hash, _| async move {
-            Ok(read_to_vec(state.inner.get(&hash, Some((lo, hi))).await?)
-                .await?
-                .into())
+            let read = state.inner.get(&hash, Some((lo, hi))).await?;
+            // Ensure the buffer is fit for saving in the page cache
+            Ok(read_to_bytes_with_fit(read, len as usize).await?)
         })
         .await
     }
@@ -711,17 +716,19 @@ impl<P: Provider + 'static> CachedState<P> {
         hash: &str,
         n: u64,
         prefetch_depth: u32,
+        len: u64,
     ) -> Result<Bytes, Error> {
         if prefetch_depth > 0 {
             let this = Arc::clone(self);
             let hash = hash.to_string();
+            let len = self.pagesize;
             tokio::spawn(async move {
-                this.get_single_cached_chunk(&hash, n + prefetch_depth as u64)
+                this.get_single_cached_chunk(&hash, n + prefetch_depth as u64, len)
                     .await
                     .ok();
             });
         }
-        self.get_single_cached_chunk(hash, n).await
+        self.get_single_cached_chunk(hash, n, len).await
     }
 }
 
@@ -731,14 +738,14 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         self.state.get_cached_size(hash).await
     }
 
-    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error> {
         let (start, end) = range.unwrap_or((0, u64::MAX));
         check_range(range)?;
 
         if start == end {
             // Special case: The range has length 0, so we can't divide it into chunks.
             self.head(hash).await?;
-            return Ok(empty_stream());
+            return Ok(empty_read());
         }
 
         let chunk_begin: u64 = 1 + start / self.state.pagesize;
@@ -753,11 +760,12 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         // reading until we reach the end of the requested range or get an error.
         let first_chunk = self
             .state
-            .get_cached_chunk(hash, chunk_begin, prefetch_depth)
+            // TODO(dano): limit len to file size - let the user pass in known file size
+            .get_cached_chunk(hash, chunk_begin, prefetch_depth, self.state.pagesize)
             .await?;
         let initial_offset = start - (chunk_begin - 1) * self.state.pagesize;
         if initial_offset > first_chunk.len() as u64 {
-            return Ok(empty_stream());
+            return Ok(empty_read());
         }
 
         let reached_end = (first_chunk.len() as u64) < self.state.pagesize;
@@ -765,7 +773,7 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         // If it fits in a single chunk, just return the data immediately.
         if reached_end || first_chunk.len() as u64 >= end - start {
             let total_len = first_chunk.len().min((end - start) as usize);
-            return Ok(Box::pin(Cursor::new(first_chunk.slice(..total_len))));
+            return Ok(BlobRead::from_bytes(first_chunk.slice(..total_len)));
         }
         let remaining_bytes = Arc::new(Mutex::new(end - start - first_chunk.len() as u64));
 
@@ -781,7 +789,10 @@ impl<P: Provider + 'static> Provider for Cached<P> {
                 if chunk == chunk_begin {
                     return Ok::<_, Error>(first_chunk);
                 }
-                let bytes = state.get_cached_chunk(&hash, chunk, prefetch_depth).await?;
+                // TODO(dano): limit len to file size
+                let bytes = state
+                    .get_cached_chunk(&hash, chunk, prefetch_depth, state.pagesize)
+                    .await?;
                 let mut remaining_bytes = remaining_bytes.lock();
                 if bytes.len() as u64 > *remaining_bytes {
                     let result = bytes.slice(..*remaining_bytes as usize);
@@ -797,7 +808,7 @@ impl<P: Provider + 'static> Provider for Cached<P> {
             Ok(bytes) => !bytes.is_empty(), // gracefully end the stream
             Err(_) => true,
         });
-        Ok(Box::pin(StreamReader::new(stream)))
+        Ok(BlobRead::from_stream(StreamReader::new(stream)))
     }
 
     async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
