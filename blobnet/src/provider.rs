@@ -554,7 +554,15 @@ impl<P: Provider + 'static> CachedState<P> {
                 {
                     Ok(result) => match result {
                         Ok(r) => r,
-                        Err(_) => Err(anyhow!("pending request channel dropped").into()),
+                        Err(_) => {
+                            _ = self.pending_requests.lock().remove(&key); // Remove the dropped key
+                            Err(anyhow!(
+                                "pending request channel dropped hash={} n={}",
+                                hash.clone(),
+                                n
+                            )
+                            .into())
+                        }
                     },
                     Err(_) => {
                         eprintln!("timeout waiting on pending request {key:?}");
