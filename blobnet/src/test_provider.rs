@@ -11,9 +11,11 @@ use std::task::{ready, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use tokio::io::AsyncRead;
+use tokio::sync::oneshot;
 
-use crate::{provider::Provider, BlobRange, BlobRead, Error, ReadStream};
+use crate::{provider::Provider, read_to_vec, BlobRange, BlobRead, Error, ReadStream};
 
 /// Tracks network out bytes served by `get` requests.
 pub struct Tracking<P> {
@@ -203,5 +205,65 @@ impl AsyncRead for TrackingStream<'_> {
         let bytes_sent = buf.filled().len() - len;
         this.bytes_read.fetch_add(bytes_sent, Ordering::SeqCst);
         Poll::Ready(Ok(()))
+    }
+}
+
+pub type HeadRequest = String;
+pub type GetRequest = (String, BlobRange);
+pub type PutRequest = Bytes;
+pub type PendingHeadResponse = oneshot::Sender<Result<u64, Error>>;
+pub type PendingGetResponse = oneshot::Sender<Result<Bytes, Error>>;
+pub type PendingPutResponse = oneshot::Sender<Result<String, Error>>;
+
+pub enum Request {
+    Head(HeadRequest, PendingHeadResponse),
+    Get(GetRequest, PendingGetResponse),
+    Put(PutRequest, PendingPutResponse),
+}
+
+pub struct MockProvider {
+    requests_tx: async_channel::Sender<Request>,
+    pub requests: async_channel::Receiver<Request>,
+}
+
+impl Default for MockProvider {
+    fn default() -> Self {
+        let (tx, rx) = async_channel::unbounded();
+        MockProvider {
+            requests_tx: tx,
+            requests: rx,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for MockProvider {
+    async fn head(&self, hash: &str) -> Result<u64, Error> {
+        let (tx, rx) = oneshot::channel();
+        self.requests_tx
+            .send(Request::Head(hash.to_string(), tx))
+            .await
+            .map_err(anyhow::Error::from)?;
+        rx.await.map_err(anyhow::Error::from)?
+    }
+
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<BlobRead<'static>, Error> {
+        let (tx, rx) = oneshot::channel();
+        self.requests_tx
+            .send(Request::Get((hash.to_string(), range), tx))
+            .await
+            .map_err(anyhow::Error::from)?;
+        rx.await
+            .map_err(anyhow::Error::from)?
+            .map(BlobRead::from_bytes)
+    }
+
+    async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
+        let (tx, rx) = oneshot::channel();
+        self.requests_tx
+            .send(Request::Put(Bytes::from(read_to_vec(data).await?), tx))
+            .await
+            .map_err(anyhow::Error::from)?;
+        rx.await.map_err(anyhow::Error::from)?
     }
 }

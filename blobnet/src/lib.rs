@@ -156,11 +156,13 @@ pub enum BlobRead<'a> {
 
 /// Factory methods for `BlobRead`
 impl<'a> BlobRead<'a> {
-    fn from_bytes(value: Bytes) -> BlobRead<'a> {
+    /// Create a `BlobRead` from a buffer of bytes
+    pub fn from_bytes(value: Bytes) -> BlobRead<'a> {
         BlobRead::Bytes(value)
     }
 
-    fn from_stream<T: AsyncRead + Send + 'a>(value: T) -> BlobRead<'a> {
+    /// Create a `BlobRead` from a stream of bytes
+    pub fn from_stream<T: AsyncRead + Send + 'a>(value: T) -> BlobRead<'a> {
         BlobRead::Stream(Box::pin(value))
     }
 }

@@ -22,6 +22,7 @@ use hyper::{body::Bytes, client::connect::Connect};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use tempfile::tempfile;
+use tokio::sync::broadcast::Sender;
 use tokio::{fs, io::AsyncReadExt, sync::broadcast, task, time};
 use tokio_stream::StreamExt;
 use tokio_util::io::StreamReader;
@@ -426,16 +427,7 @@ impl Default for PageCache {
 }
 
 type RequestKey = (String, u64);
-type SenderHandle = broadcast::Sender<Result<Bytes, Error>>;
 type PendingRequest = broadcast::Receiver<Result<Bytes, Error>>;
-
-// A deduplicated request has 1 sender and N waiters on the pending
-// request.
-#[derive(Debug)]
-enum RequestRole {
-    Sender(SenderHandle),
-    Waiter(PendingRequest),
-}
 
 struct CachedState<P> {
     inner: P,
@@ -521,7 +513,7 @@ impl<P: Provider + 'static> CachedState<P> {
         func: F,
     ) -> Result<Bytes, Error>
     where
-        F: (Fn(Arc<Self>, String, u64) -> Out) + Send + 'static,
+        F: (Fn(Arc<Self>, String, u64) -> Out) + Send + Clone + 'static,
         Out: Future<Output = Result<Bytes, Error>> + Send,
     {
         if let Some(bytes) = self.page_cache.lock().get(hash.clone(), n) {
@@ -531,80 +523,110 @@ impl<P: Provider + 'static> CachedState<P> {
         // Check for pending requests to the same hash and offset and deduplicate them
         // if found, listening for the immediate following response.
         let key = (hash.clone(), n);
-        let role = {
+        let mut receiver = {
             use std::collections::hash_map::Entry::*;
-
             match self.pending_requests.lock().entry(key.clone()) {
-                Occupied(o) => RequestRole::Waiter(o.get().resubscribe()),
+                Occupied(o) => o.get().resubscribe(),
                 Vacant(v) => {
+                    // Spawn a task to fetch the chunk to insulate from request cancellation
                     let (tx, rx) = broadcast::channel(1);
+                    let state = Arc::clone(self);
+                    let receiver = rx.resubscribe();
+                    let hash = hash.clone();
+                    let func = func.clone();
+                    task::spawn(async move { state.fetch(hash, n, func, tx).await });
                     v.insert(rx);
-                    RequestRole::Sender(tx)
+                    receiver
                 }
             }
         };
 
-        match role {
-            RequestRole::Waiter(mut rx) => {
-                match time::timeout(
-                    Duration::from_millis(MAX_PENDING_REQUEST_WAIT_MS),
-                    rx.recv(),
-                )
-                .await
-                {
-                    Ok(result) => match result {
-                        Ok(r) => r,
-                        Err(_) => {
-                            _ = self.pending_requests.lock().remove(&key); // Remove the dropped key
-                            Err(anyhow!(
-                                "pending request channel dropped hash={} n={}",
-                                hash.clone(),
-                                n
-                            )
-                            .into())
-                        }
-                    },
-                    Err(_) => {
-                        eprintln!("timeout waiting on pending request {key:?}");
-                        func(self.clone(), hash.clone(), n).await
-                    }
+        match time::timeout(
+            Duration::from_millis(MAX_PENDING_REQUEST_WAIT_MS),
+            receiver.recv(),
+        )
+        .await
+        {
+            Ok(result) => match result {
+                Ok(r) => r,
+                Err(_) => {
+                    _ = self.pending_requests.lock().remove(&key); // Remove the dropped key
+                    Err(anyhow!(
+                        "pending request channel dropped hash={} n={}",
+                        hash.clone(),
+                        n
+                    )
+                    .into())
                 }
-            }
-            RequestRole::Sender(tx) => {
-                let path = self.page_disk_path(&hash, n)?;
-                // Attempt fetch from diskcache first, falling back to function.
-                let (result, hit_diskcache) = if let Ok(data) = fs::read(&path).await {
-                    (Ok(Bytes::from(data)), true)
-                } else {
-                    (func(self.clone(), hash.clone(), n).await, false)
-                };
-
-                // Populate in-memory and disk caches.
-                if let Ok(bytes) = &result {
-                    self.page_cache
-                        .lock()
-                        .insert(hash.clone(), n, bytes.clone());
-                    if !hit_diskcache {
-                        self.populate_disk_cache(&hash, n, func, bytes.len() as u64);
-                    }
-                };
-
-                // Finish all blocked, pending requests.
-                if let Some(_rx) = self.pending_requests.lock().remove(&key) {
-                    tx.send(result.clone()).ok();
-                }
-                result
+            },
+            Err(_) => {
+                eprintln!("timeout waiting on pending request {key:?}");
+                func(self.clone(), hash.clone(), n).await
             }
         }
     }
 
-    /// Asynchronously populate the disk cache with the specified hash chunk
-    fn populate_disk_cache<F, Out>(self: &Arc<Self>, hash: &str, n: u64, func: F, bytes_len: u64)
+    /// Run a cached pending request function and broadcast result to waiters
+    async fn fetch<F, Out>(
+        self: &Arc<Self>,
+        hash: String,
+        n: u64,
+        func: F,
+        tx: Sender<Result<Bytes, Error>>,
+    ) where
+        F: (Fn(Arc<Self>, String, u64) -> Out) + Send + 'static,
+        Out: Future<Output = Result<Bytes, Error>> + Send,
+    {
+        let result = self.try_fetch(&hash, n, func).await;
+
+        // Finish all blocked, pending requests.
+        let key = (hash.clone(), n);
+        if let Some(_rx) = self.pending_requests.lock().remove(&key) {
+            tx.send(result).ok();
+        }
+    }
+
+    /// Try to run a cached request function
+    async fn try_fetch<F, Out>(
+        self: &Arc<Self>,
+        hash: &str,
+        n: u64,
+        func: F,
+    ) -> Result<Bytes, Error>
     where
         F: (Fn(Arc<Self>, String, u64) -> Out) + Send + 'static,
         Out: Future<Output = Result<Bytes, Error>> + Send,
     {
+        let path = self.page_disk_path(hash, n)?;
         let hash = hash.to_owned();
+
+        // Attempt fetch from diskcache first, falling back to function.
+        let (result, hit_diskcache) = if let Ok(data) = fs::read(&path).await {
+            (Ok(Bytes::from(data)), true)
+        } else {
+            let f = func(self.clone(), hash.clone(), n);
+            (f.await, false)
+        };
+
+        // Populate in-memory and disk caches.
+        if let Ok(bytes) = &result {
+            self.page_cache
+                .lock()
+                .insert(hash.clone(), n, bytes.clone());
+            if !hit_diskcache {
+                self.populate_disk_cache(hash, n, func, bytes.len() as u64);
+            }
+        };
+
+        result
+    }
+
+    /// Asynchronously populate the disk cache with the specified hash chunk
+    fn populate_disk_cache<F, Out>(self: &Arc<Self>, hash: String, n: u64, func: F, bytes_len: u64)
+    where
+        F: (Fn(Arc<Self>, String, u64) -> Out) + Send + 'static,
+        Out: Future<Output = Result<Bytes, Error>> + Send,
+    {
         let state = self.clone();
 
         self.diskcache_pending_write_pages.fetch_add(1, Relaxed);

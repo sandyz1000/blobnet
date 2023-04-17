@@ -21,6 +21,7 @@ aws-types = "0.49.0"
 base64 = "0.13.1"
 bytes = "1"
 clap = { version = "4.0.18", features = ["derive", "env"] }
+async-channel = "1.8.0"
 fastrand = "1.8.0"
 hashlink = "0.8.1"
 hex = "0.4.3"
